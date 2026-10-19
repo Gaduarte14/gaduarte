@@ -1,0 +1,6 @@
+{
+  "name": "Owlbear Quest VTT",
+  "description": "Plataforma completa de RPG de mesa (Virtual Tabletop) com mapa tático, névoa de guerra dinâmica com iluminação por token, fichas D&D 5e interativas, rolador de dados Rollem, iniciativa automática, mixer de áudio multi-faixa do YouTube e sincronização em tempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
