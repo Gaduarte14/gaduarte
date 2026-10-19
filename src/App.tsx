@@ -400,13 +400,19 @@ export default function App() {
       bcRef.current = bc;
     }
 
+    const customWsUrl = import.meta.env.VITE_WS_URL as string | undefined;
+    const isStaticGithubPages =
+      typeof window !== 'undefined' &&
+      window.location.hostname.endsWith('.github.io') &&
+      !customWsUrl;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsUrl = customWsUrl || `${protocol}//${window.location.host}/ws`;
     let ws: WebSocket | null = null;
 
-    try {
-      ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+    if (!isStaticGithubPages) {
+      try {
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
 
       ws.onopen = () => {
         ws?.send(
@@ -469,9 +475,10 @@ export default function App() {
         } catch {
           // ignore malformed messages
         }
-      };
-    } catch {
-      // fallback to localStorage/BroadcastChannel if running purely static
+        };
+      } catch {
+        // fallback to localStorage/BroadcastChannel if running purely static
+      }
     }
 
     return () => {
