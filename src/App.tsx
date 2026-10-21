@@ -1023,6 +1023,7 @@ export default function App() {
         scene={activeScene}
         sheets={campaign.fichas}
         userRole={userRole}
+        activePlayingSheetId={activePlayingSheetId}
         activeTool={activeMapTool}
         zoom={zoom}
         pan={pan}
@@ -1078,43 +1079,22 @@ export default function App() {
             <User className="w-4 h-4" />
           </button>
 
-          <div className="relative">
-            <span className="absolute -top-3.5 left-1/2 -translate-x-1/2 px-1.5 py-0.2 rounded-full bg-fuchsia-600 text-[9px] font-bold text-white whitespace-nowrap shadow">
-              {campaign.calendarioFantasia}
-            </span>
+          {userRole === 'mestre' && (
             <button
               type="button"
-              onClick={() => {
-                const nextDay = prompt(
-                  'Atualizar data do calendário da campanha:',
-                  campaign.calendarioFantasia
-                );
-                if (nextDay && nextDay.trim()) {
-                  commitCampaignState((prev) => ({
-                    ...prev,
-                    calendarioFantasia: nextDay.trim(),
-                  }));
-                }
-              }}
-              title="Calendário da Campanha"
-              className="p-1.5 rounded-xl text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors cursor-pointer"
+              onClick={() =>
+                setActiveDockCategory(activeDockCategory === 'scene' ? null : 'scene')
+              }
+              title="Mapas & Cenas (Exclusivo do Mestre)"
+              className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
+                activeDockCategory === 'scene'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-zinc-300 hover:bg-zinc-700/60 hover:text-white'
+              }`}
             >
-              <Calendar className="w-4 h-4" />
+              <MapPin className="w-4 h-4" />
             </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setActiveDockCategory(activeDockCategory === 'scene' ? null : 'scene')}
-            title="Mapas & Cenas"
-            className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
-              activeDockCategory === 'scene'
-                ? 'bg-violet-600 text-white'
-                : 'text-zinc-300 hover:bg-zinc-700/60 hover:text-white'
-            }`}
-          >
-            <MapPin className="w-4 h-4" />
-          </button>
+          )}
 
           <button
             type="button"
@@ -1122,6 +1102,7 @@ export default function App() {
               setSidebarOpen(true);
               setSidebarTab('iniciativa');
             }}
+            aria-label="Acessar Ordem de Iniciativa"
             title="Ordem de Iniciativa da Mesa"
             className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
               sidebarOpen && sidebarTab === 'iniciativa'
@@ -1130,15 +1111,6 @@ export default function App() {
             }`}
           >
             <Trophy className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={handleRollTableInitiativeAllTokens}
-            title="Rolar Iniciativa Automática para Todos os Tokens da Mesa"
-            className="p-1.5 rounded-xl text-zinc-300 hover:bg-zinc-700/60 hover:text-amber-300 transition-colors cursor-pointer"
-          >
-            <Swords className="w-4 h-4" />
           </button>
 
           <button
@@ -1194,7 +1166,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Owlbear "Players" Card + Single-GM Lock Status */}
+        {/* Owlbear "Players" Card + Single-GM Lock Status + Exclusive Player Fog Selector */}
         <div
           className={`w-64 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl p-3.5 shadow-2xl pointer-events-auto ${
             sidebarOpen ? 'hidden md:block' : 'block'
@@ -1228,6 +1200,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => handleChangeUserRole('jogador')}
+                data-testid="toggle-role-btn"
                 className="px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors bg-violet-600/30 text-violet-300 border border-violet-500/40 hover:bg-violet-600/50 shrink-0"
                 title="Você é o único Mestre da sala (1/1). Clique se quiser liberar a vaga de Mestre e virar Jogador."
               >
@@ -1244,12 +1217,44 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => handleChangeUserRole('mestre')}
+                data-testid="toggle-role-btn"
                 className="px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-violet-600/40 shrink-0"
                 title="Vaga de Mestre livre (0/1). Clique para assumir como Mestre da sala."
               >
                 Assumir GM (0/1)
               </button>
             )}
+          </div>
+
+          {/* Per-Player Exclusive Fog of War Vision Indicator & Character Selector */}
+          <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-1">
+            <div className="flex items-center justify-between text-[10px] text-zinc-400">
+              <span className="font-semibold uppercase tracking-wider">
+                {userRole === 'mestre' ? 'Visão: Mestre (Vê Tudo)' : 'Visão Exclusiva do Token:'}
+              </span>
+            </div>
+            <select
+              aria-label="Selecionar Meu Personagem para Visão na Névoa"
+              data-testid="player-fog-sheet-select"
+              value={activePlayingSheetId}
+              onChange={(e) => {
+                const nextId = e.target.value;
+                setActivePlayingSheetId(nextId);
+                const ownTok = activeScene.tokens.find((t) => t.fichaId === nextId);
+                if (ownTok) {
+                  setSelectedTokenId(ownTok.id);
+                }
+              }}
+              className="w-full bg-[#181922] border border-zinc-700/80 rounded-lg px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-violet-500"
+            >
+              {campaign.fichas
+                .filter((f) => !f.ehMestreOculto || userRole === 'mestre')
+                .map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.nomePersonagem} ({f.classeNivel})
+                  </option>
+                ))}
+            </select>
           </div>
 
           <div className="mt-2.5 pt-2.5 border-t border-zinc-800 space-y-1.5">
@@ -1471,213 +1476,215 @@ export default function App() {
         {activeScene.escalaUnidade} · {Math.round(zoom * 100)}%
       </button>
 
-      {/* BOTTOM-CENTER OWLBEAR RODEO DOCK */}
-      <BottomOwlbearDock
-        userRole={userRole}
-        activeCategory={activeDockCategory}
-        onSelectCategory={setActiveDockCategory}
-        searchQuery={dockSearchQuery}
-        onChangeSearch={setDockSearchQuery}
-        folders={campaign.pastasAssets}
-        assets={campaign.assets}
-        scenes={campaign.cenas}
-        activeSceneId={activeScene.id}
-        sheets={campaign.fichas}
-        onSelectScene={(sceneId) => {
-          commitCampaignState((prev) => ({ ...prev, cenaAtivaId: sceneId }));
-        }}
-        onCreateScene={(
-          nome,
-          pastaId,
-          bgDataUrl,
-          larguraQuadrados,
-          alturaQuadrados,
-          tamanhoGradePx,
-          extraConfig
-        ) => {
-          if (userRole !== 'mestre') return;
-          const novaCena: MapScene = {
-            id: `scene-${Date.now()}`,
+      {/* BOTTOM-CENTER OWLBEAR RODEO DOCK — Exclusivo do Mestre */}
+      {userRole === 'mestre' && (
+        <BottomOwlbearDock
+          userRole={userRole}
+          activeCategory={activeDockCategory}
+          onSelectCategory={setActiveDockCategory}
+          searchQuery={dockSearchQuery}
+          onChangeSearch={setDockSearchQuery}
+          folders={campaign.pastasAssets}
+          assets={campaign.assets}
+          scenes={campaign.cenas}
+          activeSceneId={activeScene.id}
+          sheets={campaign.fichas}
+          onSelectScene={(sceneId) => {
+            commitCampaignState((prev) => ({ ...prev, cenaAtivaId: sceneId }));
+          }}
+          onCreateScene={(
             nome,
             pastaId,
-            fundoUrl: bgDataUrl || '',
-            larguraQuadrados: larguraQuadrados || 24,
-            alturaQuadrados: alturaQuadrados || 16,
-            tamanhoGradePx: tamanhoGradePx || 64,
-            escalaUnidade: extraConfig?.escalaUnidade || '5ft',
-            proporcaoAspecto: extraConfig?.proporcaoAspecto,
-            proporcaoTrancada: extraConfig?.proporcaoTrancada ?? true,
-            corGrade: extraConfig?.corGrade || '#ffffff',
-            opacidadeGrade: extraConfig?.opacidadeGrade ?? 0.22,
-            espessuraLinhaPx: extraConfig?.espessuraLinhaPx ?? 2,
-            tipoGrade: extraConfig?.tipoGrade || 'square',
-            estiloLinha: extraConfig?.estiloLinha || 'solid',
-            snappingAtivo: extraConfig?.snappingAtivo ?? true,
-            nevoaAtiva: extraConfig?.nevoaAtiva ?? true,
-            iluminacaoDinamicaAtiva: true,
-            nevoaAreasManuais: [],
-            tokens: [],
-            desenhos: [],
-          };
-          commitCampaignState((prev) => ({
-            ...prev,
-            cenaAtivaId: novaCena.id,
-            cenas: [...prev.cenas, novaCena],
-          }));
-        }}
-        onUpdateSceneDimensions={(
-          sceneId,
-          larguraQuadrados,
-          alturaQuadrados,
-          tamanhoGradePx,
-          extraConfig
-        ) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            cenas: prev.cenas.map((c) =>
-              c.id === sceneId
-                ? {
-                    ...c,
-                    ...extraConfig,
-                    larguraQuadrados,
-                    alturaQuadrados,
-                    tamanhoGradePx,
-                  }
-                : c
-            ),
-          }));
-        }}
-        onDeleteScene={(sceneId) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => {
-            const remaining = prev.cenas.filter((c) => c.id !== sceneId);
-            if (remaining.length === 0) {
-              const fallbackScene: MapScene = {
-                id: `scene-${Date.now()}`,
-                nome: 'Mapa Tático Principal',
-                pastaId: null,
-                fundoUrl: '',
-                larguraQuadrados: 24,
-                alturaQuadrados: 16,
-                tamanhoGradePx: 64,
-                escalaUnidade: '5ft',
-                nevoaAtiva: true,
-                iluminacaoDinamicaAtiva: true,
-                nevoaAreasManuais: [],
-                tokens: [],
-                desenhos: [],
-              };
+            bgDataUrl,
+            larguraQuadrados,
+            alturaQuadrados,
+            tamanhoGradePx,
+            extraConfig
+          ) => {
+            if (userRole !== 'mestre') return;
+            const novaCena: MapScene = {
+              id: `scene-${Date.now()}`,
+              nome,
+              pastaId,
+              fundoUrl: bgDataUrl || '',
+              larguraQuadrados: larguraQuadrados || 24,
+              alturaQuadrados: alturaQuadrados || 16,
+              tamanhoGradePx: tamanhoGradePx || 64,
+              escalaUnidade: extraConfig?.escalaUnidade || '5ft',
+              proporcaoAspecto: extraConfig?.proporcaoAspecto,
+              proporcaoTrancada: extraConfig?.proporcaoTrancada ?? true,
+              corGrade: extraConfig?.corGrade || '#ffffff',
+              opacidadeGrade: extraConfig?.opacidadeGrade ?? 0.22,
+              espessuraLinhaPx: extraConfig?.espessuraLinhaPx ?? 2,
+              tipoGrade: extraConfig?.tipoGrade || 'square',
+              estiloLinha: extraConfig?.estiloLinha || 'solid',
+              snappingAtivo: extraConfig?.snappingAtivo ?? true,
+              nevoaAtiva: extraConfig?.nevoaAtiva ?? true,
+              iluminacaoDinamicaAtiva: true,
+              nevoaAreasManuais: [],
+              tokens: [],
+              desenhos: [],
+            };
+            commitCampaignState((prev) => ({
+              ...prev,
+              cenaAtivaId: novaCena.id,
+              cenas: [...prev.cenas, novaCena],
+            }));
+          }}
+          onUpdateSceneDimensions={(
+            sceneId,
+            larguraQuadrados,
+            alturaQuadrados,
+            tamanhoGradePx,
+            extraConfig
+          ) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              cenas: prev.cenas.map((c) =>
+                c.id === sceneId
+                  ? {
+                      ...c,
+                      ...extraConfig,
+                      larguraQuadrados,
+                      alturaQuadrados,
+                      tamanhoGradePx,
+                    }
+                  : c
+              ),
+            }));
+          }}
+          onDeleteScene={(sceneId) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => {
+              const remaining = prev.cenas.filter((c) => c.id !== sceneId);
+              if (remaining.length === 0) {
+                const fallbackScene: MapScene = {
+                  id: `scene-${Date.now()}`,
+                  nome: 'Mapa Tático Principal',
+                  pastaId: null,
+                  fundoUrl: '',
+                  larguraQuadrados: 24,
+                  alturaQuadrados: 16,
+                  tamanhoGradePx: 64,
+                  escalaUnidade: '5ft',
+                  nevoaAtiva: true,
+                  iluminacaoDinamicaAtiva: true,
+                  nevoaAreasManuais: [],
+                  tokens: [],
+                  desenhos: [],
+                };
+                return {
+                  ...prev,
+                  cenaAtivaId: fallbackScene.id,
+                  cenas: [fallbackScene],
+                };
+              }
+              const nextActiveId =
+                prev.cenaAtivaId === sceneId ? remaining[0].id : prev.cenaAtivaId;
               return {
                 ...prev,
-                cenaAtivaId: fallbackScene.id,
-                cenas: [fallbackScene],
+                cenaAtivaId: nextActiveId,
+                cenas: remaining,
               };
-            }
-            const nextActiveId =
-              prev.cenaAtivaId === sceneId ? remaining[0].id : prev.cenaAtivaId;
-            return {
-              ...prev,
-              cenaAtivaId: nextActiveId,
-              cenas: remaining,
+            });
+          }}
+          onCreateFolder={(nome, categoria) => {
+            if (userRole !== 'mestre') return;
+            const novaPasta: AssetFolder = {
+              id: `folder-${Date.now()}`,
+              nome,
+              categoria,
+              ordem: campaign.pastasAssets.length + 1,
             };
-          });
-        }}
-        onCreateFolder={(nome, categoria) => {
-          if (userRole !== 'mestre') return;
-          const novaPasta: AssetFolder = {
-            id: `folder-${Date.now()}`,
-            nome,
-            categoria,
-            ordem: campaign.pastasAssets.length + 1,
-          };
-          commitCampaignState((prev) => ({
-            ...prev,
-            pastasAssets: [...prev.pastasAssets, novaPasta],
-          }));
-        }}
-        onRenameFolder={(folderId, novoNome) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            pastasAssets: prev.pastasAssets.map((f) =>
-              f.id === folderId ? { ...f, nome: novoNome } : f
-            ),
-          }));
-        }}
-        onDeleteFolder={(folderId) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            pastasAssets: prev.pastasAssets.filter((f) => f.id !== folderId),
-            assets: prev.assets.map((a) =>
-              a.pastaId === folderId ? { ...a, pastaId: null } : a
-            ),
-            cenas: prev.cenas.map((c) =>
-              c.pastaId === folderId ? { ...c, pastaId: null } : c
-            ),
-          }));
-        }}
-        onUploadAssetLossless={(newAsset) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            assets: [newAsset, ...prev.assets],
-          }));
-        }}
-        onUpdateAsset={(updatedAsset) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            assets: prev.assets.map((a) => (a.id === updatedAsset.id ? updatedAsset : a)),
-          }));
-        }}
-        onDeleteAsset={(assetId) => {
-          if (userRole !== 'mestre') return;
-          commitCampaignState((prev) => ({
-            ...prev,
-            assets: prev.assets.filter((a) => a.id !== assetId),
-          }));
-        }}
-        onSpawnAssetToMap={(asset) => {
-          if (userRole !== 'mestre') return;
-          const linkedSheet = asset.fichaPersonagemId
-            ? campaign.fichas.find((f) => f.id === asset.fichaPersonagemId)
-            : undefined;
-          const newTok: MapToken = {
-            id: `tok-${Date.now()}`,
-            nome: linkedSheet?.nomePersonagem || asset.nome,
-            categoria: asset.categoria,
-            fichaId: linkedSheet?.id,
-            x: 10,
-            y: 7,
-            larguraQuadrados: asset.padraoQuadrados || 1,
-            alturaQuadrados: asset.padraoQuadrados || 1,
-            rotacao: 0,
-            cor: linkedSheet?.corToken || '#8b5cf6',
-            imagemUrl: asset.dataUrl,
-            pvAtual: linkedSheet?.pvAtual ?? (asset.categoria === 'character' ? 20 : undefined),
-            pvMaximo: linkedSheet?.pvMaximo ?? (asset.categoria === 'character' ? 20 : undefined),
-            ca: linkedSheet?.classeArmadura ?? (asset.categoria === 'character' ? 14 : undefined),
-            visaoQuadrados:
-              linkedSheet?.visaoAlcanceQuadrados ?? (asset.categoria === 'character' ? 6 : 0),
-            luzQuadrados:
-              linkedSheet?.luzAlcanceQuadrados ?? (asset.categoria === 'prop' ? 4 : 0),
-            luzCor: '#f59e0b',
-            ocultoParaJogadores: false,
-            bloqueado: false,
-            condicoes: [],
-          };
-          commitCampaignState((prev) => ({
-            ...prev,
-            cenas: prev.cenas.map((c) =>
-              c.id === activeScene.id ? { ...c, tokens: [...c.tokens, newTok] } : c
-            ),
-          }));
-          setSelectedTokenId(newTok.id);
-        }}
-        onOpenSheetById={(sheetId) => setActiveSheetModalId(sheetId)}
-      />
+            commitCampaignState((prev) => ({
+              ...prev,
+              pastasAssets: [...prev.pastasAssets, novaPasta],
+            }));
+          }}
+          onRenameFolder={(folderId, novoNome) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              pastasAssets: prev.pastasAssets.map((f) =>
+                f.id === folderId ? { ...f, nome: novoNome } : f
+              ),
+            }));
+          }}
+          onDeleteFolder={(folderId) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              pastasAssets: prev.pastasAssets.filter((f) => f.id !== folderId),
+              assets: prev.assets.map((a) =>
+                a.pastaId === folderId ? { ...a, pastaId: null } : a
+              ),
+              cenas: prev.cenas.map((c) =>
+                c.pastaId === folderId ? { ...c, pastaId: null } : c
+              ),
+            }));
+          }}
+          onUploadAssetLossless={(newAsset) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              assets: [newAsset, ...prev.assets],
+            }));
+          }}
+          onUpdateAsset={(updatedAsset) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              assets: prev.assets.map((a) => (a.id === updatedAsset.id ? updatedAsset : a)),
+            }));
+          }}
+          onDeleteAsset={(assetId) => {
+            if (userRole !== 'mestre') return;
+            commitCampaignState((prev) => ({
+              ...prev,
+              assets: prev.assets.filter((a) => a.id !== assetId),
+            }));
+          }}
+          onSpawnAssetToMap={(asset) => {
+            if (userRole !== 'mestre') return;
+            const linkedSheet = asset.fichaPersonagemId
+              ? campaign.fichas.find((f) => f.id === asset.fichaPersonagemId)
+              : undefined;
+            const newTok: MapToken = {
+              id: `tok-${Date.now()}`,
+              nome: linkedSheet?.nomePersonagem || asset.nome,
+              categoria: asset.categoria,
+              fichaId: linkedSheet?.id,
+              x: 10,
+              y: 7,
+              larguraQuadrados: asset.padraoQuadrados || 1,
+              alturaQuadrados: asset.padraoQuadrados || 1,
+              rotacao: 0,
+              cor: linkedSheet?.corToken || '#8b5cf6',
+              imagemUrl: asset.dataUrl,
+              pvAtual: linkedSheet?.pvAtual ?? (asset.categoria === 'character' ? 20 : undefined),
+              pvMaximo: linkedSheet?.pvMaximo ?? (asset.categoria === 'character' ? 20 : undefined),
+              ca: linkedSheet?.classeArmadura ?? (asset.categoria === 'character' ? 14 : undefined),
+              visaoQuadrados:
+                linkedSheet?.visaoAlcanceQuadrados ?? (asset.categoria === 'character' ? 6 : 0),
+              luzQuadrados:
+                linkedSheet?.luzAlcanceQuadrados ?? (asset.categoria === 'prop' ? 4 : 0),
+              luzCor: '#f59e0b',
+              ocultoParaJogadores: false,
+              bloqueado: false,
+              condicoes: [],
+            };
+            commitCampaignState((prev) => ({
+              ...prev,
+              cenas: prev.cenas.map((c) =>
+                c.id === activeScene.id ? { ...c, tokens: [...c.tokens, newTok] } : c
+              ),
+            }));
+            setSelectedTokenId(newTok.id);
+          }}
+          onOpenSheetById={(sheetId) => setActiveSheetModalId(sheetId)}
+        />
+      )}
 
       {/* RIGHT QUEST PORTAL SIDEBAR */}
       {sidebarOpen && (
