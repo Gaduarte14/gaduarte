@@ -22,6 +22,7 @@ import {
   Flame,
   LayoutGrid,
   Lock,
+  BookOpen,
 } from 'lucide-react';
 import { INITIAL_CAMPAIGN_STATE } from './data/initialCampaign.ts';
 import type {
@@ -38,8 +39,11 @@ import type {
   MusicTrack,
 } from './types/vtt.ts';
 import {
+  createInvisibleLightToken,
   evaluateDiceExpression,
   interpolateSheetVariables,
+  recordTokenFogMemoryPath,
+  recordTokenFogMemoryStep,
   rollTableInitiativeForTokens,
   syncCampaignCharacterNames,
 } from './utils/dndRules.ts';
@@ -152,7 +156,9 @@ export default function App() {
 
   // Right Quest Portal Sidebar States
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
-  const [sidebarTab, setSidebarTab] = useState<'chat' | 'iniciativa' | 'musica' | 'fichas'>('chat');
+  const [sidebarTab, setSidebarTab] = useState<
+    'chat' | 'iniciativa' | 'musica' | 'fichas' | 'notas'
+  >('chat');
 
   // Undo/Redo Drawing Stack
   const [redoDrawings, setRedoDrawings] = useState<MapDrawing[]>([]);
@@ -429,7 +435,20 @@ export default function App() {
           c.id === activeScene.id
             ? {
                 ...c,
-                tokens: c.tokens.map((t) => (t.id === tokenId ? { ...t, x: newX, y: newY } : t)),
+                tokens: c.tokens.map((t) =>
+                  t.id === tokenId
+                    ? {
+                        ...t,
+                        x: newX,
+                        y: newY,
+                        memoriaExplorada: recordTokenFogMemoryPath(
+                          t.memoriaExplorada,
+                          { ...t, x: newX, y: newY },
+                          { x: t.x, y: t.y }
+                        ),
+                      }
+                    : t
+                ),
               }
             : c
         ),
@@ -459,24 +478,31 @@ export default function App() {
   };
 
   const handleUpdateToken = (updatedToken: MapToken) => {
+    const tokenWithMemory: MapToken = {
+      ...updatedToken,
+      memoriaExplorada: recordTokenFogMemoryStep(
+        updatedToken.memoriaExplorada,
+        updatedToken
+      ),
+    };
     commitCampaignState((prev) => ({
       ...prev,
       cenas: prev.cenas.map((c) =>
         c.id === activeScene.id
           ? {
-               ...c,
-              tokens: c.tokens.map((t) => (t.id === updatedToken.id ? updatedToken : t)),
+              ...c,
+              tokens: c.tokens.map((t) => (t.id === tokenWithMemory.id ? tokenWithMemory : t)),
             }
           : c
       ),
       fichas: prev.fichas.map((f) =>
-        f.id === updatedToken.fichaId
+        f.id === tokenWithMemory.fichaId
           ? {
               ...f,
-              nomePersonagem: updatedToken.nome || f.nomePersonagem,
-              pvAtual: updatedToken.pvAtual ?? f.pvAtual,
-              visaoAlcanceQuadrados: updatedToken.visaoQuadrados,
-              luzAlcanceQuadrados: updatedToken.luzQuadrados,
+              nomePersonagem: tokenWithMemory.nome || f.nomePersonagem,
+              pvAtual: tokenWithMemory.pvAtual ?? f.pvAtual,
+              visaoAlcanceQuadrados: tokenWithMemory.visaoQuadrados,
+              luzAlcanceQuadrados: tokenWithMemory.luzQuadrados,
             }
           : f
       ),
@@ -484,7 +510,8 @@ export default function App() {
   };
 
   const handleDeleteToken = (tokenId: string) => {
-    if (userRole !== 'mestre') return;
+    const targetTok = activeScene.tokens.find((t) => t.id === tokenId);
+    if (userRole !== 'mestre' && !targetTok?.ehFonteDeLuz) return;
     commitCampaignState((prev) => ({
       ...prev,
       cenas: prev.cenas.map((c) =>
@@ -950,6 +977,19 @@ export default function App() {
         onMoveToken={handleMoveToken}
         onUpdateToken={handleUpdateToken}
         onDeleteToken={handleDeleteToken}
+        onPlaceLightToken={(gridX, gridY) => {
+          const newLight = createInvisibleLightToken(gridX, gridY, 4);
+          commitCampaignState((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === activeScene.id
+                ? { ...c, tokens: [...c.tokens, newLight] }
+                : c
+            ),
+          }));
+          setSelectedTokenId(newLight.id);
+          setActiveMapTool('hand');
+        }}
         onOpenSheet={(sheetId) => setActiveSheetModalId(sheetId)}
         onAddDrawing={(drawing) => {
           commitCampaignState((prev) => ({
@@ -1060,6 +1100,24 @@ export default function App() {
 
           <button
             type="button"
+            data-testid="hud-open-notas-btn"
+            onClick={() => {
+              setSidebarOpen(true);
+              setSidebarTab('notas');
+            }}
+            aria-label="Abrir Minhas Notas e Pastas Particulares"
+            title="Minhas Notas & Pastas Particulares (Visível somente para você)"
+            className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
+              sidebarOpen && sidebarTab === 'notas'
+                ? 'bg-violet-600 text-white'
+                : 'text-zinc-300 hover:bg-zinc-700/60 hover:text-white'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setSidebarOpen(true);
               setSidebarTab('musica');
@@ -1110,9 +1168,17 @@ export default function App() {
           </div>
 
           <div className="flex items-center justify-between py-1 gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               <span className="w-3 h-3 rounded-full bg-[#4ade80] shrink-0" />
-              <span className="text-xs font-medium text-zinc-100 truncate">{userName}</span>
+              <input
+                type="text"
+                aria-label="Meu Nome de Jogador"
+                data-testid="player-identity-input"
+                value={userName}
+                onChange={(e) => setUserName(e.target.value)}
+                title="Seu nome de usuário (suas Notas e Pastas são particulares para este usuário)"
+                className="w-full bg-transparent hover:bg-[#181922] focus:bg-[#181922] border border-transparent focus:border-violet-500/60 rounded px-1.5 py-0.5 text-xs font-medium text-zinc-100 focus:outline-none truncate"
+              />
             </div>
 
             <button
@@ -1306,22 +1372,20 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => {
-              if (selectedTokenId) {
-                const tok = activeScene.tokens.find((t) => t.id === selectedTokenId);
-                if (tok) {
-                  handleUpdateToken({
-                    ...tok,
-                    luzQuadrados: tok.luzQuadrados > 0 ? 0 : 4,
-                  });
-                }
-              }
-            }}
-            aria-label="Alternar Luz / Tocha no Token Selecionado"
-            title="Adicionar/Alternar Luz (Tocha 20ft) no Personagem Selecionado"
-            className="p-2 rounded-xl text-amber-400 hover:bg-zinc-700/60 transition-colors cursor-pointer"
+            data-testid="tool-add-light-btn"
+            onClick={() =>
+              setActiveMapTool(activeMapTool === 'light' ? 'hand' : 'light')
+            }
+            aria-label="Adicionar Luz no Mapa"
+            title="Adicionar [Luz] no Mapa — Clique aqui e depois clique no mapa para colocar um ponto de iluminação invisível"
+            className={`px-2 py-1.5 rounded-xl transition-colors cursor-pointer flex flex-col items-center gap-0.5 ${
+              activeMapTool === 'light'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-lg ring-2 ring-amber-300'
+                : 'text-amber-400 hover:bg-zinc-700/60'
+            }`}
           >
             <Flame className="w-4 h-4" />
+            <span className="text-[9px] font-bold uppercase leading-none">Luz</span>
           </button>
 
           <button
@@ -1622,6 +1686,8 @@ export default function App() {
         <RightQuestPortalSidebar
           activeTab={sidebarTab}
           onChangeTab={setSidebarTab}
+          sessionId={sessionId}
+          userName={userName}
           logs={campaign.logsCombate}
           damageHistory={damageHistory}
           sheets={campaign.fichas}

@@ -23,6 +23,7 @@ import {
   Edit3,
   Check,
   Crosshair,
+  BookOpen,
 } from 'lucide-react';
 import type {
   CharacterSheet,
@@ -40,10 +41,14 @@ import {
 } from '../utils/dndRules.ts';
 import { rollInput, type ParsedRollGroup, type RollMode } from '../utils/engine.ts';
 import type { DamageHistoryEntry } from '../utils/dano.ts';
+import { buildPrivateOwnerKey } from '../utils/questPortalNotesEngine.ts';
+import { QuestPortalNotesModule } from './QuestPortalNotesModule.tsx';
 
 interface RightQuestPortalSidebarProps {
-  activeTab: 'chat' | 'iniciativa' | 'musica' | 'fichas';
-  onChangeTab: (tab: 'chat' | 'iniciativa' | 'musica' | 'fichas') => void;
+  activeTab: 'chat' | 'iniciativa' | 'musica' | 'fichas' | 'notas';
+  onChangeTab: (tab: 'chat' | 'iniciativa' | 'musica' | 'fichas' | 'notas') => void;
+  sessionId?: string;
+  userName?: string;
   logs: CombatLogEntry[];
   damageHistory: DamageHistoryEntry[];
   sheets: CharacterSheet[];
@@ -101,6 +106,8 @@ function renderRollemDetailWithStrikethrough(detail: string): React.ReactNode {
 export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = ({
   activeTab,
   onChangeTab,
+  sessionId = 'local-session',
+  userName = 'Jogador',
   logs,
   damageHistory,
   sheets,
@@ -259,49 +266,61 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
       aria-label="Painel Lateral Quest Portal"
     >
       {/* Top Segmented Navigation */}
-      <div className="flex items-center justify-between px-2.5 py-2 bg-[#20222e] border-b border-zinc-800">
-        <div className="grid grid-cols-4 gap-1 bg-[#14151c] p-1 rounded-xl border border-zinc-800 flex-1">
+      <div className="flex items-center justify-between px-2 py-2 bg-[#20222e] border-b border-zinc-800">
+        <div className="grid grid-cols-5 gap-1 bg-[#14151c] p-1 rounded-xl border border-zinc-800 flex-1">
           <button
             type="button"
             onClick={() => onChangeTab('chat')}
-            className={`py-1.5 px-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
               activeTab === 'chat' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <Dices className="w-3.5 h-3.5 shrink-0" />
+            <Dices className="w-3 h-3 shrink-0" />
             <span>Dados</span>
           </button>
           <button
             type="button"
             onClick={() => onChangeTab('iniciativa')}
-            className={`py-1.5 px-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
               activeTab === 'iniciativa'
                 ? 'bg-violet-600 text-white'
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <Swords className="w-3.5 h-3.5 shrink-0" />
+            <Swords className="w-3 h-3 shrink-0" />
             <span>Iniciativa</span>
           </button>
           <button
             type="button"
             onClick={() => onChangeTab('musica')}
-            className={`py-1.5 px-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
               activeTab === 'musica' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <Music className="w-3.5 h-3.5 shrink-0" />
-            <span>Música ({currentlyPlayingTracks.length})</span>
+            <Music className="w-3 h-3 shrink-0" />
+            <span>Música</span>
           </button>
           <button
             type="button"
             onClick={() => onChangeTab('fichas')}
-            className={`py-1.5 px-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
               activeTab === 'fichas' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <FileText className="w-3.5 h-3.5 shrink-0" />
+            <FileText className="w-3 h-3 shrink-0" />
             <span>Fichas</span>
+          </button>
+          <button
+            type="button"
+            data-testid="sidebar-tab-notas"
+            onClick={() => onChangeTab('notas')}
+            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+              activeTab === 'notas' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
+            }`}
+            title="Minhas Notas & Pastas Particulares (Visível apenas para você)"
+          >
+            <BookOpen className="w-3 h-3 shrink-0" />
+            <span>Notas</span>
           </button>
         </div>
 
@@ -1178,6 +1197,31 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* TAB 5: ABA SEPARADA DE NOTAS & PASTAS PARTICULARES (SÓ O CRIADOR VÊ)  */}
+      {/* ===================================================================== */}
+      {activeTab === 'notas' && (
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <QuestPortalNotesModule
+            compactSidebarMode
+            criadorId={buildPrivateOwnerKey(sessionId, userName)}
+            nomeCriador={userName}
+            userRole={userRole}
+            personagemId={activeSheet?.id || 'default'}
+            nomePersonagem={activeSheet?.nomePersonagem || 'Personagem'}
+            classePersonagem={
+              activeSheet?.classe
+                ? `${activeSheet.classe}${activeSheet.subclasse ? ` (${activeSheet.subclasse})` : ''}`
+                : activeSheet?.classeNivel || 'Aventureiro'
+            }
+            nivelPersonagem={activeSheet?.nivel || 5}
+            onRoll={(expressaoResolvida) => {
+              executeRollText(expressaoResolvida);
+            }}
+          />
         </div>
       )}
     </aside>

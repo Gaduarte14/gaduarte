@@ -10,18 +10,37 @@ import {
   Unlock,
   Edit3,
   Sparkles,
+  Plus,
+  Minus,
 } from 'lucide-react';
-import type { CharacterSheet, MapDrawing, MapScene, MapToken } from '../types/vtt.ts';
+import type {
+  CharacterSheet,
+  ExploredFogCircle,
+  MapDrawing,
+  MapScene,
+  MapToken,
+} from '../types/vtt.ts';
 import {
   DND_CONDITIONS,
   computeDynamicTokenVisionCircles,
+  computePlayerExploredMemoryCircles,
   getConditionMeta,
   hasConditionInList,
   isTokenInsideFog,
+  recordTokenFogMemoryPath,
+  recordTokenFogMemoryStep,
   toggleConditionInList,
 } from '../utils/dndRules.ts';
 
-export type ActiveMapTool = 'hand' | 'select' | 'fog' | 'draw' | 'measure' | 'pointer' | 'text';
+export type ActiveMapTool =
+  | 'hand'
+  | 'select'
+  | 'fog'
+  | 'light'
+  | 'draw'
+  | 'measure'
+  | 'pointer'
+  | 'text';
 
 interface TacticalMapCanvasProps {
   scene: MapScene;
@@ -40,6 +59,7 @@ interface TacticalMapCanvasProps {
   onMoveToken: (tokenId: string, newX: number, newY: number, isLiveDrag?: boolean) => void;
   onUpdateToken: (updated: MapToken) => void;
   onDeleteToken: (tokenId: string) => void;
+  onPlaceLightToken?: (gridX: number, gridY: number) => void;
   onOpenSheet: (sheetId: string) => void;
   onAddDrawing: (drawing: MapDrawing) => void;
   onToggleSceneFog: () => void;
@@ -62,11 +82,13 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   onMoveToken,
   onUpdateToken,
   onDeleteToken,
+  onPlaceLightToken,
   onOpenSheet,
   onAddDrawing,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fogCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const memoryCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Dragging state for pan or 60fps zero-lag token movement
   const [isPanning, setIsPanning] = useState(false);
@@ -77,6 +99,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     tokenId: string;
     x: number;
     y: number;
+    memoriaExplorada?: ExploredFogCircle[];
   } | null>(null);
   const lastLiveBroadcastRef = useRef<number>(0);
 
@@ -98,11 +121,18 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const mapWidthPx = scene.larguraQuadrados * gridSize;
   const mapHeightPx = scene.alturaQuadrados * gridSize;
 
-  // Combine scene tokens with 60fps liveDragPos so the dragged token and its fog/light move instantaneously with the mouse
+  // Combine scene tokens with 60fps liveDragPos & live explored memory trail so the dragged token and its fog/light/memory update instantaneously
   const effectiveTokens = useMemo(() => {
     if (!liveDragPos) return scene.tokens;
     return scene.tokens.map((t) =>
-      t.id === liveDragPos.tokenId ? { ...t, x: liveDragPos.x, y: liveDragPos.y } : t
+      t.id === liveDragPos.tokenId
+        ? {
+            ...t,
+            x: liveDragPos.x,
+            y: liveDragPos.y,
+            memoriaExplorada: liveDragPos.memoriaExplorada ?? t.memoriaExplorada,
+          }
+        : t
     );
   }, [scene.tokens, liveDragPos]);
 
@@ -115,9 +145,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     [userRole, activePlayingSheetId, selectedTokenId]
   );
 
-  // Render Dynamic Fog of War & Token Torch Light on Canvas whenever tokens move!
-  // - Mestre ('mestre'): sees everything (semi-transparent fog + all tokens' vision/light circles).
-  // - Jogador ('jogador'): ONLY sees where their OWN character's token illuminates! Other players' tokens do not reveal fog for them.
+  // Render 3-Tier Dynamic Fog of War + Token Memory + Torch Light on Canvas:
+  // 1. Escuridão Total (Unexplored): 100% pitch-black ('rgba(3, 4, 7, 1.0)') for Players where their token has never illuminated/seen.
+  // 2. Memória do Token (Explored Trail): Places where the player's token already walked with active [Luz] or [Visão] stay with the semi-transparent fog ("a névoa de agora", ~0.64 alpha) instead of total darkness!
+  // 3. Visão / Luz Ativa Agora: Places currently illuminated by the player's [Visão] or any active [Luz] are 100% clear (0% fog).
   useEffect(() => {
     const canvas = fogCanvasRef.current;
     if (!canvas) return;
@@ -128,21 +159,69 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
     if (!scene.nevoaAtiva) return;
 
-    // 1. Fill map with Owlbear atmospheric fog:
-    //    - Mestre sees through the fog (0.58 alpha) so they see the entire map and all tokens.
-    //    - Jogador gets opaque fog (0.96 alpha) so they only see where their own token illuminates.
     ctx.save();
+
+    // 1. Base Layer: Escuridão Total (100% pitch black for Jogador, translucent preview for Mestre)
+    ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle =
-      userRole === 'mestre' ? 'rgba(10, 11, 16, 0.58)' : 'rgba(7, 8, 12, 0.96)';
+      userRole === 'mestre' ? 'rgba(8, 9, 14, 0.66)' : 'rgba(3, 4, 7, 1.0)';
     ctx.fillRect(0, 0, mapWidthPx, mapHeightPx);
 
-    // 2. Cut out vision and light circles dynamically based on viewer role & player's own token
+    // 2. Token Memory Layer ("a névoa de agora" where the player's token already passed with [Luz] or [Visão]):
+    const memoryCircles = computePlayerExploredMemoryCircles(
+      effectiveTokens,
+      gridSize,
+      fogViewerOptions
+    );
+
+    if (memoryCircles.length > 0) {
+      if (!memoryCanvasRef.current) {
+        memoryCanvasRef.current = document.createElement('canvas');
+      }
+      const memCanvas = memoryCanvasRef.current;
+      if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
+        memCanvas.width = mapWidthPx;
+        memCanvas.height = mapHeightPx;
+      }
+      const memCtx = memCanvas.getContext('2d');
+      if (memCtx) {
+        memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
+        memCtx.globalCompositeOperation = 'source-over';
+        for (const mc of memoryCircles) {
+          if (mc.radiusPx <= 0) continue;
+          const memGrad = memCtx.createRadialGradient(
+            mc.xPx,
+            mc.yPx,
+            mc.radiusPx * 0.65,
+            mc.xPx,
+            mc.yPx,
+            mc.radiusPx
+          );
+          memGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+          memGrad.addColorStop(0.85, 'rgba(0, 0, 0, 0.9)');
+          memGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          memCtx.fillStyle = memGrad;
+          memCtx.beginPath();
+          memCtx.arc(mc.xPx, mc.yPx, mc.radiusPx, 0, Math.PI * 2);
+          memCtx.fill();
+        }
+
+        // Erase partial alpha from the pitch-black fog so explored memory areas stay with "a névoa de agora" (~0.64 alpha)
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.globalAlpha = userRole === 'mestre' ? 0.42 : 0.36;
+        ctx.drawImage(memCanvas, 0, 0);
+        ctx.globalAlpha = 1.0;
+      }
+    }
+
+    // 3. Active Vision & Active Light Cutout (100% clear where currently illuminated)
     const circles = computeDynamicTokenVisionCircles(
       effectiveTokens,
       gridSize,
       fogViewerOptions
     );
     ctx.globalCompositeOperation = 'destination-out';
+    ctx.globalAlpha = 1.0;
 
     for (const c of circles) {
       if (c.effectiveRadiusPx <= 0) continue;
@@ -171,7 +250,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       }
     }
 
-    // 3. Draw warm ambient torch/arcane light tint where visible tokens emit light
+    // 4. Draw warm ambient torch/arcane light tint where visible tokens or placed [Luz] emit light
     ctx.globalCompositeOperation = 'source-over';
     for (const c of circles) {
       if (c.lightRadiusPx <= 0) continue;
@@ -217,6 +296,19 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const handleMouseDownCanvas = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.button !== 1) return;
     const coords = clientToMapCoords(e.clientX, e.clientY);
+
+    if (activeTool === 'light') {
+      const gridX = Math.max(
+        0,
+        Math.min(scene.larguraQuadrados - 1, coords.x / gridSize - 0.5)
+      );
+      const gridY = Math.max(
+        0,
+        Math.min(scene.alturaQuadrados - 1, coords.y / gridSize - 0.5)
+      );
+      onPlaceLightToken?.(gridX, gridY);
+      return;
+    }
 
     if (activeTool === 'measure') {
       setMeasurePoints({
@@ -272,11 +364,25 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           Math.min(scene.alturaQuadrados - token.alturaQuadrados, rawGridY)
         );
 
-        // Update local position immediately at 60fps (no step-freeze, no localStorage overhead)
-        setLiveDragPos({
-          tokenId: draggingTokenId,
-          x: clampedX,
-          y: clampedY,
+        // Update local position and explored fog memory trail immediately at 60fps
+        setLiveDragPos((prev) => {
+          const baseMem = prev?.memoriaExplorada ?? token.memoriaExplorada;
+          const prevPos = prev ? { x: prev.x, y: prev.y } : { x: token.x, y: token.y };
+          const nextMem = recordTokenFogMemoryPath(
+            baseMem,
+            {
+              ...token,
+              x: clampedX,
+              y: clampedY,
+            },
+            prevPos
+          );
+          return {
+            tokenId: draggingTokenId,
+            x: clampedX,
+            y: clampedY,
+            memoriaExplorada: nextMem,
+          };
         });
 
         // Throttled lightweight WebSocket broadcast every 50ms
@@ -323,7 +429,22 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       const finalY = snapEnabled
         ? Math.round(liveDragPos.y * 2) / 2
         : Math.round(liveDragPos.y * 100) / 100;
-      onMoveToken(draggingTokenId, finalX, finalY, false);
+      const origToken = scene.tokens.find((t) => t.id === draggingTokenId);
+      if (origToken && !origToken.ehFonteDeLuz && liveDragPos.memoriaExplorada) {
+        const finalMem = recordTokenFogMemoryStep(liveDragPos.memoriaExplorada, {
+          ...origToken,
+          x: finalX,
+          y: finalY,
+        });
+        onUpdateToken({
+          ...origToken,
+          x: finalX,
+          y: finalY,
+          memoriaExplorada: finalMem,
+        });
+      } else {
+        onMoveToken(draggingTokenId, finalX, finalY, false);
+      }
     }
     setDraggingTokenId(null);
     setLiveDragPos(null);
@@ -592,6 +713,113 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               ? Math.max(0, Math.min(100, Math.round((hpCur / hpMax) * 100)))
               : null;
 
+          // Special rendering for 100% invisible placed Light Source tokens (`ehFonteDeLuz: true`)
+          if (token.ehFonteDeLuz) {
+            return (
+              <div
+                key={token.id}
+                data-testid={`light-token-${token.id}`}
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  onSelectToken(token.id);
+                  if (!token.bloqueado) {
+                    const coords = clientToMapCoords(e.clientX, e.clientY);
+                    setDraggingTokenId(token.id);
+                    setDragOffsetGrid({
+                      dx: coords.x / gridSize - token.x,
+                      dy: coords.y / gridSize - token.y,
+                    });
+                    setLiveDragPos({
+                      tokenId: token.id,
+                      x: token.x,
+                      y: token.y,
+                    });
+                  }
+                }}
+                style={{
+                  left: `${token.x * gridSize}px`,
+                  top: `${token.y * gridSize}px`,
+                  width: `${token.larguraQuadrados * gridSize}px`,
+                  height: `${token.alturaQuadrados * gridSize}px`,
+                  willChange: draggingTokenId === token.id ? 'left, top' : undefined,
+                }}
+                className="absolute z-30 group cursor-pointer active:cursor-grabbing flex items-center justify-center"
+                role="button"
+                tabIndex={0}
+                title={`Luz (${token.luzQuadrados}q) — Clique para selecionar, aumentar ou diminuir`}
+                aria-label={`Fonte de Luz invisível (${token.luzQuadrados} quadrados)`}
+              >
+                {/* 100% Invisible Token body when unselected; shows dashed selection ring when selected or hovered */}
+                <div
+                  className={`w-full h-full rounded-full transition-opacity flex items-center justify-center ${
+                    isSelected
+                      ? 'opacity-100 ring-2 ring-amber-400 bg-amber-500/15 shadow-lg'
+                      : activeTool === 'light'
+                        ? 'opacity-70 ring-1 ring-amber-400/60 bg-amber-500/10'
+                        : 'opacity-0 group-hover:opacity-60 ring-1 ring-amber-400/50 bg-amber-500/10'
+                  }`}
+                >
+                  <Flame className="w-4 h-4 text-amber-300 drop-shadow" />
+                </div>
+
+                {/* Floating On-Map +/- Light Radius Controls when this invisible Light is selected */}
+                {isSelected && (
+                  <div
+                    onMouseDown={(e) => e.stopPropagation()}
+                    data-testid="selected-light-floating-controls"
+                    className="absolute -top-11 left-1/2 -translate-x-1/2 z-50 bg-[#181922]/95 border border-amber-500/70 rounded-xl px-2 py-1 shadow-2xl flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <button
+                      type="button"
+                      data-testid="light-decrease-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onUpdateToken({
+                          ...token,
+                          luzQuadrados: Math.max(0, (token.luzQuadrados || 0) - 1),
+                        });
+                      }}
+                      title="Diminuir alcance da Luz (-1 quadrado)"
+                      className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-amber-600/40 text-amber-300 flex items-center justify-center cursor-pointer transition-colors"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="text-[11px] font-mono font-bold text-amber-300 px-1">
+                      💡 {token.luzQuadrados}q
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="light-increase-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onUpdateToken({
+                          ...token,
+                          luzQuadrados: Math.min(24, (token.luzQuadrados || 0) + 1),
+                        });
+                      }}
+                      title="Aumentar alcance da Luz (+1 quadrado)"
+                      className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-amber-600/40 text-amber-300 flex items-center justify-center cursor-pointer transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="light-delete-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteToken(token.id);
+                      }}
+                      title="Apagar este ponto de Luz"
+                      className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-rose-900/70 text-zinc-400 hover:text-rose-300 flex items-center justify-center cursor-pointer transition-colors ml-0.5"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
           return (
             <div
               key={token.id}
@@ -609,6 +837,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                     tokenId: token.id,
                     x: token.x,
                     y: token.y,
+                    memoriaExplorada: recordTokenFogMemoryStep(token.memoriaExplorada, token),
                   });
                 }
               }}
@@ -733,9 +962,23 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         })}
       </div>
 
+      {/* Active Light Placement Tool Banner */}
+      {activeTool === 'light' && (
+        <div
+          data-testid="active-light-tool-banner"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-30 bg-amber-950/95 border border-amber-400/80 text-amber-200 px-4 py-1.5 rounded-full text-xs font-semibold shadow-2xl flex items-center gap-2 pointer-events-none"
+        >
+          <Flame className="w-4 h-4 text-amber-400 animate-pulse" />
+          <span>
+            Modo Adicionar [Luz]: Clique em qualquer lugar do mapa para colocar uma iluminação invisível
+          </span>
+        </div>
+      )}
+
       {/* Selected Token Context HUD Popover (Rename, Edit Light/Vision/Size, Conditions, Open Linked Sheet, Delete) */}
       {selectedToken &&
         (userRole === 'mestre' ||
+          selectedToken.ehFonteDeLuz ||
           !isTokenInsideFog(
             selectedToken,
             effectiveTokens,
@@ -749,14 +992,20 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             role="toolbar"
             aria-label={`Controles do token ${selectedToken.nome}`}
           >
-            {/* Editable Token Name & Avatar */}
+            {/* Editable Token Name & Avatar / Light Icon */}
             <div className="flex items-center gap-2 pr-2 border-r border-zinc-700">
-              <img
-                src={selectedToken.imagemUrl}
-                alt={selectedToken.nome}
-                className="w-7 h-7 rounded-full border shrink-0"
-                style={{ borderColor: selectedToken.cor }}
-              />
+              {selectedToken.ehFonteDeLuz ? (
+                <div className="w-7 h-7 rounded-full bg-amber-500/20 border border-amber-400 flex items-center justify-center shrink-0">
+                  <Flame className="w-4 h-4 text-amber-300" />
+                </div>
+              ) : (
+                <img
+                  src={selectedToken.imagemUrl}
+                  alt={selectedToken.nome}
+                  className="w-7 h-7 rounded-full border shrink-0"
+                  style={{ borderColor: selectedToken.cor }}
+                />
+              )}
               <div>
                 <div className="flex items-center gap-1">
                   <input
@@ -769,8 +1018,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                         nome: e.target.value,
                       })
                     }
-                    title="Clique para editar o nome do token"
-                    className="font-bold text-white bg-transparent border-b border-transparent hover:border-zinc-600 focus:border-violet-400 focus:outline-none w-32 text-xs"
+                    title="Clique para editar o nome"
+                    className="font-bold text-white bg-transparent border-b border-transparent hover:border-zinc-600 focus:border-violet-400 focus:outline-none w-28 text-xs"
                   />
                   <Edit3 className="w-3 h-3 text-zinc-400 shrink-0" />
                 </div>
@@ -780,35 +1029,50 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               </div>
             </div>
 
-            {/* Light Source Radius (Add Torch / Luz ao Personagem — Visible to Everyone!) */}
+            {/* Light Source Radius (Add / Increase / Decrease Luz — Visible to Everyone!) */}
             <div
               className="flex items-center gap-1.5"
-              title="Luz de Tocha (Visível para TODOS os jogadores na Névoa)"
+              title="Luz (Visível para TODOS os jogadores na Névoa)"
             >
               <Flame className="w-4 h-4 text-amber-400" />
               <span className="text-zinc-300">Luz:</span>
+              {!selectedToken.ehFonteDeLuz && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateToken({
+                      ...selectedToken,
+                      luzQuadrados: selectedToken.luzQuadrados > 0 ? 0 : 4,
+                    })
+                  }
+                  className={`px-2 py-1 rounded-lg font-mono font-semibold cursor-pointer ${
+                    selectedToken.luzQuadrados > 0
+                      ? 'bg-amber-500/25 border border-amber-500/60 text-amber-300'
+                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {selectedToken.luzQuadrados > 0
+                    ? `Tocha (${selectedToken.luzQuadrados}q)`
+                    : '+ Add Luz'}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() =>
                   onUpdateToken({
                     ...selectedToken,
-                    luzQuadrados: selectedToken.luzQuadrados > 0 ? 0 : 4,
+                    luzQuadrados: Math.max(0, (selectedToken.luzQuadrados || 0) - 1),
                   })
                 }
-                className={`px-2 py-1 rounded-lg font-mono font-semibold cursor-pointer ${
-                  selectedToken.luzQuadrados > 0
-                    ? 'bg-amber-500/25 border border-amber-500/60 text-amber-300'
-                    : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                }`}
+                title="Diminuir Luz (-1 quadrado)"
+                className="w-6 h-6 rounded bg-zinc-800 hover:bg-amber-600/30 text-amber-300 flex items-center justify-center cursor-pointer"
               >
-                {selectedToken.luzQuadrados > 0
-                  ? `Tocha (${selectedToken.luzQuadrados}q)`
-                  : '+ Add Luz'}
+                <Minus className="w-3.5 h-3.5" />
               </button>
               <input
                 type="number"
                 min={0}
-                max={16}
+                max={24}
                 aria-label="Raio de luz em quadrados"
                 value={selectedToken.luzQuadrados}
                 onChange={(e) =>
@@ -819,178 +1083,195 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 }
                 className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-amber-300"
               />
-            </div>
-
-            {/* Vision Radius in Fog of War (Exclusive to Own Player & GM) */}
-            <div
-              className="flex items-center gap-1.5"
-              title="Visão Exclusiva do Personagem (Somente o próprio jogador e o Mestre veem)"
-            >
-              <Eye className="w-4 h-4 text-violet-400" />
-              <span className="text-zinc-300">Visão:</span>
-              <input
-                type="number"
-                min={0}
-                max={20}
-                aria-label="Raio de visão em quadrados"
-                value={selectedToken.visaoQuadrados}
-                onChange={(e) =>
-                  onUpdateToken({
-                    ...selectedToken,
-                    visaoQuadrados: Math.max(0, Number(e.target.value) || 0),
-                  })
-                }
-                className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-violet-300"
-              />
-            </div>
-
-            {/* Quick D&D 5e Conditions Selector on Token HUD */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowHudConditions((p) => !p)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer border ${
-                  (selectedToken.condicoes?.length || 0) > 0
-                    ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                    : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:text-white'
-                }`}
-                title="Gerenciar Condições de Status (D&D 5e) no Token"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Condições
-                {(selectedToken.condicoes?.length || 0) > 0
-                  ? ` (${selectedToken.condicoes.length})`
-                  : ''}
-              </button>
-              {showHudConditions && (
-                <div className="absolute top-9 left-0 z-50 w-72 bg-[#181922] border border-zinc-700 rounded-xl shadow-2xl p-2.5 grid grid-cols-2 gap-1">
-                  {DND_CONDITIONS.map((cond) => {
-                    const active = hasConditionInList(selectedToken.condicoes, cond.key);
-                    return (
-                      <button
-                        key={cond.key}
-                        type="button"
-                        onClick={() =>
-                          onUpdateToken({
-                            ...selectedToken,
-                            condicoes: toggleConditionInList(
-                              selectedToken.condicoes,
-                              cond.key
-                            ),
-                          })
-                        }
-                        title={`${cond.label}: ${cond.resumo}`}
-                        className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium cursor-pointer ${
-                          active
-                            ? 'bg-zinc-900 text-white border-amber-400'
-                            : 'bg-[#12131a] border-zinc-800 text-zinc-400 hover:text-white'
-                        }`}
-                      >
-                        <span>{cond.icon}</span>
-                        <span className="truncate">{cond.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Token Size Selector (1x1, 2x2, 3x3) */}
-            {userRole === 'mestre' && (
-              <select
-                aria-label="Tamanho do Token"
-                value={selectedToken.larguraQuadrados}
-                onChange={(e) => {
-                  const sz = Number(e.target.value) || 1;
-                  onUpdateToken({
-                    ...selectedToken,
-                    larguraQuadrados: sz,
-                    alturaQuadrados: sz,
-                  });
-                }}
-                title="Tamanho do Token na Grade"
-                className="bg-[#14151c] border border-zinc-700 rounded-lg px-2 py-1 text-xs font-mono text-zinc-200 cursor-pointer"
-              >
-                <option value={1}>1×1 (5ft)</option>
-                <option value={2}>2×2 (10ft)</option>
-                <option value={3}>3×3 (15ft)</option>
-                <option value={4}>4×4 (20ft)</option>
-              </select>
-            )}
-
-            {/* GM Manual Hide Toggle */}
-            {userRole === 'mestre' && (
               <button
                 type="button"
                 onClick={() =>
                   onUpdateToken({
                     ...selectedToken,
-                    ocultoParaJogadores: !selectedToken.ocultoParaJogadores,
+                    luzQuadrados: Math.min(24, (selectedToken.luzQuadrados || 0) + 1),
                   })
                 }
-                className={`px-2 py-1 rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer ${
-                  selectedToken.ocultoParaJogadores
-                    ? 'bg-amber-600/30 text-amber-200 border border-amber-500/50'
-                    : 'bg-zinc-800 text-zinc-300 hover:text-white'
-                }`}
-                title="Ocultar/Revelar manualmente para os jogadores"
+                title="Aumentar Luz (+1 quadrado)"
+                className="w-6 h-6 rounded bg-zinc-800 hover:bg-amber-600/30 text-amber-300 flex items-center justify-center cursor-pointer"
               >
-                <EyeOff className="w-3.5 h-3.5" />
-                {selectedToken.ocultoParaJogadores ? 'Invisível' : 'Visível'}
+                <Plus className="w-3.5 h-3.5" />
               </button>
-            )}
+            </div>
 
-            {/* Quick HP Adjustment */}
-            {selectedToken.pvAtual !== undefined && (
-              <div className="flex items-center gap-1">
-                <Heart className="w-3.5 h-3.5 text-emerald-400" />
-                <button
-                  type="button"
-                  onClick={() =>
-                    onUpdateToken({
-                      ...selectedToken,
-                      pvAtual: Math.max(0, (selectedToken.pvAtual || 0) - 2),
-                    })
-                  }
-                  className="px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 hover:bg-rose-800 font-mono cursor-pointer"
+            {!selectedToken.ehFonteDeLuz && (
+              <>
+                {/* Vision Radius in Fog of War (Exclusive to Own Player & GM) */}
+                <div
+                  className="flex items-center gap-1.5"
+                  title="Visão Exclusiva do Personagem (Somente o próprio jogador e o Mestre veem)"
                 >
-                  -2
-                </button>
-                <span className="font-mono text-zinc-200 tabular-nums">
-                  {selectedToken.pvAtual}/{selectedToken.pvMaximo}
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onUpdateToken({
-                      ...selectedToken,
-                      pvAtual: Math.min(
-                        selectedToken.pvMaximo || 99,
-                        (selectedToken.pvAtual || 0) + 2
-                      ),
-                    })
-                  }
-                  className="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 hover:bg-emerald-800 font-mono cursor-pointer"
-                >
-                  +2
-                </button>
-              </div>
+                  <Eye className="w-4 h-4 text-violet-400" />
+                  <span className="text-zinc-300">Visão:</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={20}
+                    aria-label="Raio de visão em quadrados"
+                    value={selectedToken.visaoQuadrados}
+                    onChange={(e) =>
+                      onUpdateToken({
+                        ...selectedToken,
+                        visaoQuadrados: Math.max(0, Number(e.target.value) || 0),
+                      })
+                    }
+                    className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-violet-300"
+                  />
+                </div>
+
+                {/* Quick D&D 5e Conditions Selector on Token HUD */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowHudConditions((p) => !p)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer border ${
+                      (selectedToken.condicoes?.length || 0) > 0
+                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:text-white'
+                    }`}
+                    title="Gerenciar Condições de Status (D&D 5e) no Token"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Condições
+                    {(selectedToken.condicoes?.length || 0) > 0
+                      ? ` (${selectedToken.condicoes.length})`
+                      : ''}
+                  </button>
+                  {showHudConditions && (
+                    <div className="absolute top-9 left-0 z-50 w-72 bg-[#181922] border border-zinc-700 rounded-xl shadow-2xl p-2.5 grid grid-cols-2 gap-1">
+                      {DND_CONDITIONS.map((cond) => {
+                        const active = hasConditionInList(selectedToken.condicoes, cond.key);
+                        return (
+                          <button
+                            key={cond.key}
+                            type="button"
+                            onClick={() =>
+                              onUpdateToken({
+                                ...selectedToken,
+                                condicoes: toggleConditionInList(
+                                  selectedToken.condicoes,
+                                  cond.key
+                                ),
+                              })
+                            }
+                            title={`${cond.label}: ${cond.resumo}`}
+                            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium cursor-pointer ${
+                              active
+                                ? 'bg-zinc-900 text-white border-amber-400'
+                                : 'bg-[#12131a] border-zinc-800 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            <span>{cond.icon}</span>
+                            <span className="truncate">{cond.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Token Size Selector (1x1, 2x2, 3x3) */}
+                {userRole === 'mestre' && (
+                  <select
+                    aria-label="Tamanho do Token"
+                    value={selectedToken.larguraQuadrados}
+                    onChange={(e) => {
+                      const sz = Number(e.target.value) || 1;
+                      onUpdateToken({
+                        ...selectedToken,
+                        larguraQuadrados: sz,
+                        alturaQuadrados: sz,
+                      });
+                    }}
+                    title="Tamanho do Token na Grade"
+                    className="bg-[#14151c] border border-zinc-700 rounded-lg px-2 py-1 text-xs font-mono text-zinc-200 cursor-pointer"
+                  >
+                    <option value={1}>1×1 (5ft)</option>
+                    <option value={2}>2×2 (10ft)</option>
+                    <option value={3}>3×3 (15ft)</option>
+                    <option value={4}>4×4 (20ft)</option>
+                  </select>
+                )}
+
+                {/* GM Manual Hide Toggle */}
+                {userRole === 'mestre' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateToken({
+                        ...selectedToken,
+                        ocultoParaJogadores: !selectedToken.ocultoParaJogadores,
+                      })
+                    }
+                    className={`px-2 py-1 rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer ${
+                      selectedToken.ocultoParaJogadores
+                        ? 'bg-amber-600/30 text-amber-200 border border-amber-500/50'
+                        : 'bg-zinc-800 text-zinc-300 hover:text-white'
+                    }`}
+                    title="Ocultar/Revelar manualmente para os jogadores"
+                  >
+                    <EyeOff className="w-3.5 h-3.5" />
+                    {selectedToken.ocultoParaJogadores ? 'Invisível' : 'Visível'}
+                  </button>
+                )}
+
+                {/* Quick HP Adjustment */}
+                {selectedToken.pvAtual !== undefined && (
+                  <div className="flex items-center gap-1">
+                    <Heart className="w-3.5 h-3.5 text-emerald-400" />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateToken({
+                          ...selectedToken,
+                          pvAtual: Math.max(0, (selectedToken.pvAtual || 0) - 2),
+                        })
+                      }
+                      className="px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 hover:bg-rose-800 font-mono cursor-pointer"
+                    >
+                      -2
+                    </button>
+                    <span className="font-mono text-zinc-200 tabular-nums">
+                      {selectedToken.pvAtual}/{selectedToken.pvMaximo}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateToken({
+                          ...selectedToken,
+                          pvAtual: Math.min(
+                            selectedToken.pvMaximo || 99,
+                            (selectedToken.pvAtual || 0) + 2
+                          ),
+                        })
+                      }
+                      className="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 hover:bg-emerald-800 font-mono cursor-pointer"
+                    >
+                      +2
+                    </button>
+                  </div>
+                )}
+
+                {/* Open Linked Character Sheet */}
+                {selectedToken.fichaId && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenSheet(selectedToken.fichaId!)}
+                    className="px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Ficha 5e
+                  </button>
+                )}
+              </>
             )}
 
-            {/* Open Linked Character Sheet */}
-            {selectedToken.fichaId && (
-              <button
-                type="button"
-                onClick={() => onOpenSheet(selectedToken.fichaId!)}
-                className="px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                Ficha 5e
-              </button>
-            )}
-
-            {/* Lock / Delete Token */}
-            {userRole === 'mestre' && (
+            {/* Lock / Delete Token or Light Source */}
+            {(userRole === 'mestre' || selectedToken.ehFonteDeLuz) && (
               <>
                 <button
                   type="button"
@@ -1001,7 +1282,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                     })
                   }
                   className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
-                  title={selectedToken.bloqueado ? 'Desbloquear Token' : 'Bloquear Posição'}
+                  title={selectedToken.bloqueado ? 'Desbloquear Posição' : 'Bloquear Posição'}
                 >
                   {selectedToken.bloqueado ? (
                     <Lock className="w-3.5 h-3.5" />
@@ -1014,8 +1295,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                   type="button"
                   onClick={() => onDeleteToken(selectedToken.id)}
                   className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-900/60 text-zinc-400 hover:text-rose-300 cursor-pointer"
-                  title="Apagar token do mapa"
-                  aria-label={`Remover token ${selectedToken.nome}`}
+                  title="Apagar do mapa"
+                  aria-label={`Remover ${selectedToken.nome}`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>

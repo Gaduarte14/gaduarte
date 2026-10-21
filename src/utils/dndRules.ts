@@ -5,6 +5,7 @@ import type {
   CombatLogEntry,
   DndConditionDefinition,
   DndConditionKey,
+  ExploredFogCircle,
   InitiativeParticipant,
   MapToken,
   SkillDefinition,
@@ -518,9 +519,9 @@ export function rollTableInitiativeForTokens(
   const logs: CombatLogEntry[] = [];
   const now = Date.now();
 
-  // Filter tokens that represent characters or monsters/mounts in combat
+  // Filter tokens that represent characters or monsters/mounts in combat (excluding invisible light sources)
   const combatTokens = tokens.filter(
-    (t) => t.categoria === 'character' || t.categoria === 'mount'
+    (t) => !t.ehFonteDeLuz && (t.categoria === 'character' || t.categoria === 'mount')
   );
 
   combatTokens.forEach((token, idx) => {
@@ -783,3 +784,176 @@ export function syncCampaignCharacterNames(
   }
   return Array.from(set);
 }
+
+/**
+ * Records a single explored Fog of War memory circle for a character token if it has active Vision or Light.
+ */
+export function recordTokenFogMemoryStep(
+  existingMemory: ExploredFogCircle[] | undefined,
+  token: Pick<
+    MapToken,
+    | 'x'
+    | 'y'
+    | 'larguraQuadrados'
+    | 'alturaQuadrados'
+    | 'visaoQuadrados'
+    | 'luzQuadrados'
+    | 'ehFonteDeLuz'
+  >
+): ExploredFogCircle[] {
+  const list = existingMemory ? [...existingMemory] : [];
+  if (token.ehFonteDeLuz) return list;
+
+  const activeRadius = Math.max(0, token.visaoQuadrados || 0, token.luzQuadrados || 0);
+  if (activeRadius <= 0) return list;
+
+  const w = token.larguraQuadrados || 1;
+  const h = token.alturaQuadrados || 1;
+  const cx = Math.round((token.x + w / 2) * 100) / 100;
+  const cy = Math.round((token.y + h / 2) * 100) / 100;
+
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    const dist = Math.hypot(item.x - cx, item.y - cy);
+    if (dist <= 0.35) {
+      if (activeRadius > item.raioQuadrados) {
+        list[i] = { x: cx, y: cy, raioQuadrados: activeRadius };
+      }
+      return list;
+    }
+  }
+
+  list.push({ x: cx, y: cy, raioQuadrados: activeRadius });
+  if (list.length > 600) {
+    return list.slice(list.length - 600);
+  }
+  return list;
+}
+
+/**
+ * Records explored Fog of War memory along a movement segment from `fromPos` to the token's new `(x, y)`
+ * so dragging a token across the map leaves a continuous explored memory trail where it passed.
+ */
+export function recordTokenFogMemoryPath(
+  existingMemory: ExploredFogCircle[] | undefined,
+  tokenAtTarget: Pick<
+    MapToken,
+    | 'x'
+    | 'y'
+    | 'larguraQuadrados'
+    | 'alturaQuadrados'
+    | 'visaoQuadrados'
+    | 'luzQuadrados'
+    | 'ehFonteDeLuz'
+  >,
+  fromPos?: { x: number; y: number }
+): ExploredFogCircle[] {
+  let mem = existingMemory ? [...existingMemory] : [];
+  if (tokenAtTarget.ehFonteDeLuz) return mem;
+
+  const activeRadius = Math.max(
+    0,
+    tokenAtTarget.visaoQuadrados || 0,
+    tokenAtTarget.luzQuadrados || 0
+  );
+  if (activeRadius <= 0) return mem;
+
+  if (fromPos) {
+    const dx = tokenAtTarget.x - fromPos.x;
+    const dy = tokenAtTarget.y - fromPos.y;
+    const totalDist = Math.hypot(dx, dy);
+    const steps = Math.max(1, Math.min(40, Math.ceil(totalDist / 0.5)));
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const interpX = fromPos.x + dx * t;
+      const interpY = fromPos.y + dy * t;
+      mem = recordTokenFogMemoryStep(mem, {
+        ...tokenAtTarget,
+        x: interpX,
+        y: interpY,
+      });
+    }
+    return mem;
+  }
+
+  return recordTokenFogMemoryStep(mem, tokenAtTarget);
+}
+
+export interface ExploredMemoryPixelCircle {
+  xPx: number;
+  yPx: number;
+  radiusPx: number;
+}
+
+/**
+ * Computes the explored Fog of War memory circles (in pixel coordinates) visible to the current viewer.
+ * - For a Player (`viewerRole === 'jogador'`): ONLY returns the explored memory trail of their OWN token!
+ * - For the GM (`viewerRole === 'mestre'`): Returns explored memory trails of all character tokens.
+ */
+export function computePlayerExploredMemoryCircles(
+  tokens: MapToken[],
+  gridSizePx: number,
+  options?: FogViewerOptions
+): ExploredMemoryPixelCircle[] {
+  const isStrictPlayerView =
+    options?.viewerRole === 'jogador' &&
+    Boolean(options.viewerSheetId || options.viewerTokenId);
+
+  const relevantTokens = tokens.filter((t) => {
+    if (t.ehFonteDeLuz) return false;
+    if (options?.viewerRole === 'mestre') return true;
+    if (isStrictPlayerView) {
+      return isTokenOwnedByViewer(t, options);
+    }
+    return !t.ocultoParaJogadores;
+  });
+
+  const result: ExploredMemoryPixelCircle[] = [];
+  for (const t of relevantTokens) {
+    // Include all previously recorded steps in memoriaExplorada
+    const steps = recordTokenFogMemoryStep(t.memoriaExplorada, t);
+    for (const step of steps) {
+      if (step.raioQuadrados <= 0) continue;
+      result.push({
+        xPx: step.x * gridSizePx,
+        yPx: step.y * gridSizePx,
+        radiusPx: step.raioQuadrados * gridSizePx,
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * Creates a 100% invisible Light Source token (`ehFonteDeLuz: true`) when the user clicks on the map
+ * with the `[Luz]` tool active. Selecting this light on the map allows increasing/decreasing its radius.
+ */
+export function createInvisibleLightToken(
+  gridX: number,
+  gridY: number,
+  radiusSquares: number = 4,
+  color: string = '#f59e0b'
+): MapToken {
+  const snappedX = Math.max(0, Math.round(gridX * 2) / 2);
+  const snappedY = Math.max(0, Math.round(gridY * 2) / 2);
+  return {
+    id: `light-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    nome: 'Luz',
+    categoria: 'effect',
+    x: snappedX,
+    y: snappedY,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: color,
+    imagemUrl: '',
+    visaoQuadrados: 0,
+    luzQuadrados: Math.max(1, radiusSquares),
+    luzCor: color,
+    ehFonteDeLuz: true,
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+}
+

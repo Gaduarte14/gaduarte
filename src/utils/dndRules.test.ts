@@ -473,5 +473,79 @@ test('Fog of War: Torch Light (luzQuadrados) is visible to everyone while Vision
   );
 });
 
+test('Token Fog Memory (memoriaExplorada) records path where player token walked with [Luz] or [Visão] and keeps it in player memory even after light is turned off', async () => {
+  const {
+    recordTokenFogMemoryPath,
+    computePlayerExploredMemoryCircles,
+    createInvisibleLightToken,
+  } = await import('./dndRules.ts');
 
+  let elara: MapToken = {
+    id: 'tok-elara',
+    nome: 'Elara Sombralua',
+    categoria: 'character',
+    fichaId: 'char-elara',
+    x: 2,
+    y: 2,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#8b5cf6',
+    imagemUrl: '',
+    visaoQuadrados: 0,
+    luzQuadrados: 4, // Walking with a 4-square torch
+    luzCor: '#f59e0b',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
 
+  // Elara walks from (2,2) to (8,2) while carrying her 4-square torch:
+  const memTrail = recordTokenFogMemoryPath(
+    elara.memoriaExplorada,
+    { ...elara, x: 8, y: 2 },
+    { x: 2, y: 2 }
+  );
+  assert.ok(memTrail.length > 3, 'Should interpolate multiple memory circles along the walked path');
+
+  // Even after Elara moves to (8,2) AND extinguishes her torch (luzQuadrados = 0, visaoQuadrados = 0),
+  // the places where she already walked remain in her explored memory!
+  elara = {
+    ...elara,
+    x: 8,
+    y: 2,
+    luzQuadrados: 0,
+    visaoQuadrados: 0,
+    memoriaExplorada: memTrail,
+  };
+
+  const exploredForElara = computePlayerExploredMemoryCircles([elara], 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-elara',
+  });
+  assert.equal(exploredForElara.length, memTrail.length);
+  // Start position (2.5 * 64, 2.5 * 64) and end position (8.5 * 64, 2.5 * 64) are both remembered
+  assert.ok(exploredForElara.some((c) => c.xPx === 2.5 * 64 && c.yPx === 2.5 * 64));
+  assert.ok(exploredForElara.some((c) => c.xPx === 8.5 * 64 && c.yPx === 2.5 * 64));
+
+  // Another player (Thorin) does NOT see Elara's personal explored memory trail:
+  const exploredForThorin = computePlayerExploredMemoryCircles([elara], 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-thorin',
+  });
+  assert.equal(exploredForThorin.length, 0);
+
+  // Placed 100% invisible [Luz] token emits public light for everyone and can be resized
+  const placedLight = createInvisibleLightToken(10, 10, 5);
+  assert.equal(placedLight.ehFonteDeLuz, true);
+  assert.equal(placedLight.luzQuadrados, 5);
+  assert.equal(placedLight.visaoQuadrados, 0);
+
+  const circlesWithPlacedLight = computeDynamicTokenVisionCircles([elara, placedLight], 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-thorin',
+  });
+  assert.equal(circlesWithPlacedLight.length, 1);
+  assert.equal(circlesWithPlacedLight[0].tokenId, placedLight.id);
+  assert.equal(circlesWithPlacedLight[0].lightRadiusPx, 5 * 64);
+});

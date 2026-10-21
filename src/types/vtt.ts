@@ -222,6 +222,12 @@ export interface MediaAsset {
   notasTexto?: string;
 }
 
+export interface ExploredFogCircle {
+  x: number; // Grid center X coordinate
+  y: number; // Grid center Y coordinate
+  raioQuadrados: number; // Illuminated/seen radius in grid squares
+}
+
 export interface MapToken {
   id: string;
   nome: string;
@@ -240,6 +246,8 @@ export interface MapToken {
   visaoQuadrados: number; // Token darkvision / sight radius in grid squares
   luzQuadrados: number; // Token light source radius (e.g., Torch = 4 squares / 20ft)
   luzCor: string;
+  ehFonteDeLuz?: boolean; // True when placed via the [Luz] map tool (100% invisible token emitting light)
+  memoriaExplorada?: ExploredFogCircle[]; // Explored fog-of-war trail remembered for this token
   ocultoParaJogadores: boolean;
   bloqueado: boolean;
   condicoes: string[]; // e.g. ['Envenenado', 'Concentrando']
