@@ -346,44 +346,27 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
                 <div className="flex items-center gap-1 ml-2 bg-[#20222b] p-0.5 rounded-lg">
                   <button
                     type="button"
-                    disabled={isGmSlotTakenByAnother}
-                    onClick={() => {
-                      if (!isGmSlotTakenByAnother) onChangeRole('mestre');
-                    }}
-                    title={
-                      isGmSlotTakenByAnother
-                        ? `Vaga de Mestre ocupada por ${currentGmName || 'outro usuário'} (Máximo 1 Mestre por sala)`
-                        : 'Assumir a única vaga de Mestre (GM) da sala'
-                    }
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      userRole === 'mestre'
-                        ? 'bg-violet-600 text-white cursor-pointer'
-                        : isGmSlotTakenByAnother
-                          ? 'bg-zinc-900 text-zinc-500 cursor-not-allowed opacity-60'
-                          : 'text-zinc-400 hover:text-white cursor-pointer'
-                    }`}
-                  >
-                    {isGmSlotTakenByAnother
-                      ? `🔒 Mestre Ocupado (1/1)`
-                      : userRole === 'mestre'
-                        ? 'Mestre (1/1 Ativo)'
-                        : 'Assumir Mestre (0/1)'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onChangeRole('jogador')}
-                    title={
-                      userRole === 'mestre'
-                        ? 'Liberar vaga de Mestre e entrar como Jogador'
-                        : 'Modo Jogador'
-                    }
+                    onClick={() => onChangeRole('mestre')}
+                    title="Alternar para o modo Mestre (GM)"
                     className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                      userRole === 'jogador'
+                      userRole === 'mestre'
                         ? 'bg-violet-600 text-white'
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    {userRole === 'mestre' ? 'Virar Jogador (Liberar GM)' : 'Jogador'}
+                    👑 Mestre (GM)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeRole('jogador')}
+                    title="Alternar para o modo Jogador"
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                      userRole === 'jogador'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    🛡️ Jogador
                   </button>
                 </div>
               </div>

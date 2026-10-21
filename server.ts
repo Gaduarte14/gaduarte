@@ -73,16 +73,17 @@ async function startServer() {
             if (!sessionId) break;
             clientSessions.set(ws, { sessionId, userName: userName || 'Jogador' });
 
-            // Enforce Single-GM Room Lock: only 1 GM can exist in the room
-            if (
-              !serverCampaignState.mestreSessionId ||
-              serverCampaignState.mestreSessionId === sessionId
-            ) {
-              if (requestedRole !== 'jogador') {
-                serverCampaignState.mestreSessionId = sessionId;
-                serverCampaignState.mestreNome = userName || 'Mestre (GM)';
-              }
+            if (requestedRole !== 'jogador') {
+              serverCampaignState.mestreSessionId = sessionId;
+              serverCampaignState.mestreNome = userName || 'Mestre (GM)';
             }
+            break;
+          }
+          case 'gm:claim': {
+            const { sessionId, userName } = msg.payload || {};
+            if (!sessionId) break;
+            serverCampaignState.mestreSessionId = sessionId;
+            serverCampaignState.mestreNome = userName || 'Mestre (GM)';
             broadcast({
               type: 'gm:lock_update',
               payload: {
@@ -92,62 +93,17 @@ async function startServer() {
             });
             break;
           }
-          case 'gm:claim': {
-            const { sessionId, userName } = msg.payload || {};
-            if (!sessionId) break;
-            // Only allow claiming GM if no one holds it or the same session holds it
-            if (
-              !serverCampaignState.mestreSessionId ||
-              serverCampaignState.mestreSessionId === sessionId
-            ) {
-              serverCampaignState.mestreSessionId = sessionId;
-              serverCampaignState.mestreNome = userName || 'Mestre (GM)';
-              broadcast({
-                type: 'gm:lock_update',
-                payload: {
-                  mestreSessionId: serverCampaignState.mestreSessionId,
-                  mestreNome: serverCampaignState.mestreNome,
-                },
-              });
-            } else {
-              // Reject claim and notify client of current GM
-              ws.send(
-                JSON.stringify({
-                  type: 'gm:lock_update',
-                  payload: {
-                    mestreSessionId: serverCampaignState.mestreSessionId,
-                    mestreNome: serverCampaignState.mestreNome,
-                  },
-                })
-              );
-            }
-            break;
-          }
           case 'gm:release': {
             const { sessionId } = msg.payload || {};
             if (serverCampaignState.mestreSessionId === sessionId) {
               serverCampaignState.mestreSessionId = null;
               serverCampaignState.mestreNome = null;
-              broadcast({
-                type: 'gm:lock_update',
-                payload: {
-                  mestreSessionId: null,
-                  mestreNome: null,
-                },
-              });
             }
             break;
           }
           case 'campaign:update': {
             if (msg.payload) {
-              const currentGmId = serverCampaignState.mestreSessionId;
-              const currentGmName = serverCampaignState.mestreNome;
               serverCampaignState = msg.payload;
-              // Preserve authoritative single-GM lock if another session is locked
-              if (currentGmId && !serverCampaignState.mestreSessionId) {
-                serverCampaignState.mestreSessionId = currentGmId;
-                serverCampaignState.mestreNome = currentGmName;
-              }
               serverCampaignState.nomesCampanha = syncCampaignCharacterNames(
                 serverCampaignState.nomesCampanha || [],
                 serverCampaignState.fichas || []

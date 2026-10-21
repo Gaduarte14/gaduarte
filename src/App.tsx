@@ -58,14 +58,14 @@ import { PersistentAudioEngine } from './components/PersistentAudioEngine.tsx';
 
 const LOCAL_STORAGE_KEY = 'owlbear_quest_vtt_state_v1';
 const SESSION_ID_KEY = 'owlbear_quest_session_id_v1';
-const GM_LOCK_STORAGE_KEY = 'owlbear_quest_gm_lock_v1';
+const USER_ROLE_STORAGE_KEY = 'owlbear_quest_user_role_v1';
 
 function getOrCreateClientSessionId(): string {
   try {
-    const existing = sessionStorage.getItem(SESSION_ID_KEY);
+    const existing = localStorage.getItem(SESSION_ID_KEY);
     if (existing) return existing;
     const created = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    sessionStorage.setItem(SESSION_ID_KEY, created);
+    localStorage.setItem(SESSION_ID_KEY, created);
     return created;
   } catch {
     return `sess-${Date.now()}`;
@@ -77,35 +77,11 @@ export default function App() {
 
   // Load initial campaign state from localStorage or fallback to deterministic seed data
   const [campaign, setCampaign] = useState<CampaignState>(() => {
-    let activeGmSessionId: string | null = null;
-    let activeGmName: string | null = null;
     try {
-      const gmLockRaw = localStorage.getItem(GM_LOCK_STORAGE_KEY);
-      if (gmLockRaw) {
-        const parsedLock = JSON.parse(gmLockRaw);
-        if (parsedLock?.mestreSessionId) {
-          activeGmSessionId = parsedLock.mestreSessionId;
-          activeGmName = parsedLock.mestreNome || 'Mestre (GM)';
-        }
-      }
+      // Remove legacy GM lock key that could block switching roles on deployed sites
+      localStorage.removeItem('owlbear_quest_gm_lock_v1');
     } catch {
       // ignore
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const wantsPlayerRole = params.get('role') === 'jogador';
-
-    if (!activeGmSessionId && !wantsPlayerRole) {
-      activeGmSessionId = getOrCreateClientSessionId();
-      activeGmName = 'Phap La (you)';
-      try {
-        localStorage.setItem(
-          GM_LOCK_STORAGE_KEY,
-          JSON.stringify({ mestreSessionId: activeGmSessionId, mestreNome: activeGmName })
-        );
-      } catch {
-        // ignore
-      }
     }
 
     try {
@@ -115,8 +91,8 @@ export default function App() {
         if (parsed && Array.isArray(parsed.cenas) && Array.isArray(parsed.fichas)) {
           return {
             ...parsed,
-            mestreSessionId: activeGmSessionId,
-            mestreNome: activeGmName,
+            mestreSessionId: null,
+            mestreNome: 'Phap La (you)',
             logsCombate: INITIAL_CAMPAIGN_STATE.logsCombate,
           };
         }
@@ -126,8 +102,8 @@ export default function App() {
     }
     return {
       ...INITIAL_CAMPAIGN_STATE,
-      mestreSessionId: activeGmSessionId,
-      mestreNome: activeGmName,
+      mestreSessionId: null,
+      mestreNome: 'Phap La (you)',
     };
   });
 
@@ -144,28 +120,25 @@ export default function App() {
   );
   const [damageHistory, setDamageHistory] = useState<DamageHistoryEntry[]>([]);
 
-  // Single-GM Enforcement: Only 1 Mestre allowed in the room!
-  const isGmSlotTakenByAnother = Boolean(
-    campaign.mestreSessionId && campaign.mestreSessionId !== sessionId
-  );
+  // Never block switching between Mestre and Jogador
+  const isGmSlotTakenByAnother = false;
 
   const [userRole, setUserRoleState] = useState<'mestre' | 'jogador'>(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('role') === 'jogador') return 'jogador';
-    if (campaign.mestreSessionId && campaign.mestreSessionId !== sessionId) {
-      return 'jogador';
+    if (params.get('role') === 'mestre') return 'mestre';
+    try {
+      const savedRole = sessionStorage.getItem(USER_ROLE_STORAGE_KEY);
+      if (savedRole === 'jogador' || savedRole === 'mestre') {
+        return savedRole;
+      }
+    } catch {
+      // ignore
     }
     return 'mestre';
   });
 
   const [userName, setUserName] = useState<string>('Phap La (you)');
-
-  // Enforce automatic demotion to 'jogador' if another session holds the single GM lock
-  useEffect(() => {
-    if (campaign.mestreSessionId && campaign.mestreSessionId !== sessionId && userRole === 'mestre') {
-      setUserRoleState('jogador');
-    }
-  }, [campaign.mestreSessionId, sessionId, userRole]);
 
   // Tabletop Tool & Viewport States
   const [activeMapTool, setActiveMapTool] = useState<ActiveMapTool>('hand');
@@ -252,21 +225,15 @@ export default function App() {
     focusCameraOnToken,
   ]);
 
-  // Single-GM Role Change Handler (Blocks claiming GM if another user already holds GM in the room)
+  // Role Change Handler: Freely switch between Mestre and Jogador without any blocking lock
   const handleChangeUserRole = (targetRole: 'mestre' | 'jogador') => {
+    setUserRoleState(targetRole);
+    try {
+      sessionStorage.setItem(USER_ROLE_STORAGE_KEY, targetRole);
+    } catch {
+      // ignore
+    }
     if (targetRole === 'mestre') {
-      if (campaign.mestreSessionId && campaign.mestreSessionId !== sessionId) {
-        return;
-      }
-      setUserRoleState('mestre');
-      try {
-        localStorage.setItem(
-          GM_LOCK_STORAGE_KEY,
-          JSON.stringify({ mestreSessionId: sessionId, mestreNome: userName })
-        );
-      } catch {
-        // ignore
-      }
       setCampaign((prev) => ({
         ...prev,
         mestreSessionId: sessionId,
@@ -277,36 +244,12 @@ export default function App() {
           JSON.stringify({ type: 'gm:claim', payload: { sessionId, userName } })
         );
       }
-      if (bcRef.current) {
-        bcRef.current.postMessage({
-          type: 'gm:lock_update',
-          payload: { mestreSessionId: sessionId, mestreNome: userName },
-        });
-      }
     } else {
-      setUserRoleState('jogador');
-      if (campaign.mestreSessionId === sessionId) {
-        try {
-          localStorage.removeItem(GM_LOCK_STORAGE_KEY);
-        } catch {
-          // ignore
-        }
-        setCampaign((prev) => ({
-          ...prev,
-          mestreSessionId: null,
-          mestreNome: null,
-        }));
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({ type: 'gm:release', payload: { sessionId } })
-          );
-        }
-        if (bcRef.current) {
-          bcRef.current.postMessage({
-            type: 'gm:lock_update',
-            payload: { mestreSessionId: null, mestreNome: null },
-          });
-        }
+      setActiveDockCategory(null);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({ type: 'gm:release', payload: { sessionId } })
+        );
       }
     }
   };
@@ -357,22 +300,6 @@ export default function App() {
 
   // Connect to Real-Time WebSocket + BroadcastChannel
   useEffect(() => {
-    const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key === GM_LOCK_STORAGE_KEY) {
-        try {
-          const parsed = e.newValue ? JSON.parse(e.newValue) : null;
-          setCampaign((prev) => ({
-            ...prev,
-            mestreSessionId: parsed?.mestreSessionId || null,
-            mestreNome: parsed?.mestreNome || null,
-          }));
-        } catch {
-          // ignore
-        }
-      }
-    };
-    window.addEventListener('storage', handleStorageEvent);
-
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel('owlbear_quest_vtt_channel');
       bc.onmessage = (ev) => {
@@ -380,12 +307,6 @@ export default function App() {
           isRemoteUpdateRef.current = true;
           setCampaign(ev.data.payload);
           isRemoteUpdateRef.current = false;
-        } else if (ev.data?.type === 'gm:lock_update' && ev.data.payload) {
-          setCampaign((prev) => ({
-            ...prev,
-            mestreSessionId: ev.data.payload.mestreSessionId,
-            mestreNome: ev.data.payload.mestreNome,
-          }));
         } else if (ev.data?.type === 'roll:pushed' && ev.data.payload) {
           const incoming: CombatLogEntry = ev.data.payload;
           setCampaign((prev) => {
@@ -414,67 +335,61 @@ export default function App() {
         ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
-      ws.onopen = () => {
-        ws?.send(
-          JSON.stringify({
-            type: 'session:register',
-            payload: {
-              sessionId,
-              userName,
-              requestedRole: userRole,
-            },
-          })
-        );
-      };
+        ws.onopen = () => {
+          ws?.send(
+            JSON.stringify({
+              type: 'session:register',
+              payload: {
+                sessionId,
+                userName,
+                requestedRole: userRole,
+              },
+            })
+          );
+        };
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
-            if (msg.payload) {
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
+              if (msg.payload) {
+                isRemoteUpdateRef.current = true;
+                setCampaign((prev) => ({
+                  ...msg.payload,
+                  mestreSessionId: msg.payload.mestreSessionId ?? prev.mestreSessionId,
+                  mestreNome: msg.payload.mestreNome ?? prev.mestreNome,
+                }));
+                isRemoteUpdateRef.current = false;
+              }
+            } else if (msg.type === 'token:moved' && msg.payload) {
+              const { sceneId, tokenId, x, y } = msg.payload;
               isRemoteUpdateRef.current = true;
               setCampaign((prev) => ({
-                ...msg.payload,
-                mestreSessionId: msg.payload.mestreSessionId ?? prev.mestreSessionId,
-                mestreNome: msg.payload.mestreNome ?? prev.mestreNome,
+                ...prev,
+                cenas: prev.cenas.map((c) =>
+                  c.id === sceneId
+                    ? {
+                        ...c,
+                        tokens: c.tokens.map((t) => (t.id === tokenId ? { ...t, x, y } : t)),
+                      }
+                    : c
+                ),
               }));
               isRemoteUpdateRef.current = false;
+            } else if ((msg.type === 'roll:pushed' || msg.type === 'log:added') && msg.payload) {
+              isRemoteUpdateRef.current = true;
+              setCampaign((prev) => {
+                if (prev.logsCombate.some((l) => l.id === msg.payload.id)) return prev;
+                return {
+                  ...prev,
+                  logsCombate: [msg.payload, ...prev.logsCombate].slice(0, 40),
+                };
+              });
+              isRemoteUpdateRef.current = false;
             }
-          } else if (msg.type === 'gm:lock_update' && msg.payload) {
-            setCampaign((prev) => ({
-              ...prev,
-              mestreSessionId: msg.payload.mestreSessionId,
-              mestreNome: msg.payload.mestreNome,
-            }));
-          } else if (msg.type === 'token:moved' && msg.payload) {
-            const { sceneId, tokenId, x, y } = msg.payload;
-            isRemoteUpdateRef.current = true;
-            setCampaign((prev) => ({
-              ...prev,
-              cenas: prev.cenas.map((c) =>
-                c.id === sceneId
-                  ? {
-                      ...c,
-                      tokens: c.tokens.map((t) => (t.id === tokenId ? { ...t, x, y } : t)),
-                    }
-                  : c
-              ),
-            }));
-            isRemoteUpdateRef.current = false;
-          } else if ((msg.type === 'roll:pushed' || msg.type === 'log:added') && msg.payload) {
-            isRemoteUpdateRef.current = true;
-            setCampaign((prev) => {
-              if (prev.logsCombate.some((l) => l.id === msg.payload.id)) return prev;
-              return {
-                ...prev,
-                logsCombate: [msg.payload, ...prev.logsCombate].slice(0, 40),
-              };
-            });
-            isRemoteUpdateRef.current = false;
+          } catch {
+            // ignore malformed messages
           }
-        } catch {
-          // ignore malformed messages
-        }
         };
       } catch {
         // fallback to localStorage/BroadcastChannel if running purely static
@@ -482,7 +397,6 @@ export default function App() {
     }
 
     return () => {
-      window.removeEventListener('storage', handleStorageEvent);
       ws?.close();
       bcRef.current?.close();
     };
@@ -1072,11 +986,16 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setShowCampaignHub(true)}
-            title="Gerenciar Perfil e Papel (Mestre / Jogador)"
-            className="p-1.5 rounded-xl text-violet-300 hover:bg-zinc-700/60 transition-colors cursor-pointer"
+            onClick={() => handleChangeUserRole(userRole === 'mestre' ? 'jogador' : 'mestre')}
+            title="Alternar rapidamente entre Mestre (GM) e Jogador"
+            className={`px-2 py-1 rounded-xl text-[11px] font-bold uppercase transition-colors cursor-pointer flex items-center gap-1 ${
+              userRole === 'mestre'
+                ? 'bg-violet-600/30 text-violet-200 border border-violet-500/50 hover:bg-violet-600/50'
+                : 'bg-emerald-600/30 text-emerald-200 border border-emerald-500/50 hover:bg-emerald-600/50'
+            }`}
           >
-            <User className="w-4 h-4" />
+            <User className="w-3.5 h-3.5" />
+            <span>{userRole === 'mestre' ? 'Mestre' : 'Jogador'}</span>
           </button>
 
           {userRole === 'mestre' && (
@@ -1166,7 +1085,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Owlbear "Players" Card + Single-GM Lock Status + Exclusive Player Fog Selector */}
+        {/* Owlbear "Players" Card + Free Role Switcher + Exclusive Player Fog Selector */}
         <div
           className={`w-64 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl p-3.5 shadow-2xl pointer-events-auto ${
             sidebarOpen ? 'hidden md:block' : 'block'
@@ -1175,8 +1094,8 @@ export default function App() {
           <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-700/80">
             <div className="flex items-center gap-1.5">
               <span className="text-sm font-bold text-white">Players</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">
-                1 GM Max
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                {userRole === 'mestre' ? 'Modo Mestre' : 'Modo Jogador'}
               </span>
             </div>
             <button
@@ -1196,34 +1115,46 @@ export default function App() {
               <span className="text-xs font-medium text-zinc-100 truncate">{userName}</span>
             </div>
 
-            {userRole === 'mestre' ? (
-              <button
-                type="button"
-                onClick={() => handleChangeUserRole('jogador')}
-                data-testid="toggle-role-btn"
-                className="px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors bg-violet-600/30 text-violet-300 border border-violet-500/40 hover:bg-violet-600/50 shrink-0"
-                title="Você é o único Mestre da sala (1/1). Clique se quiser liberar a vaga de Mestre e virar Jogador."
-              >
-                Mestre (1/1)
-              </button>
-            ) : isGmSlotTakenByAnother ? (
-              <span
-                className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-zinc-800 text-zinc-400 border border-zinc-700 flex items-center gap-1 shrink-0 cursor-not-allowed"
-                title={`A sala já possui 1 Mestre ativo (${campaign.mestreNome || 'GM'}). Apenas 1 Mestre é permitido.`}
-              >
-                <Lock className="w-2.5 h-2.5 text-amber-400" /> Player (GM 1/1)
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => handleChangeUserRole('mestre')}
-                data-testid="toggle-role-btn"
-                className="px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-violet-600/40 shrink-0"
-                title="Vaga de Mestre livre (0/1). Clique para assumir como Mestre da sala."
-              >
-                Assumir GM (0/1)
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() =>
+                handleChangeUserRole(userRole === 'mestre' ? 'jogador' : 'mestre')
+              }
+              data-testid="toggle-role-btn"
+              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors shrink-0 ${
+                userRole === 'mestre'
+                  ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40 hover:bg-violet-600/50'
+                  : 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/50'
+              }`}
+              title="Clique para alternar livremente entre Mestre e Jogador"
+            >
+              {userRole === 'mestre' ? 'Mestre (Trocar)' : 'Jogador (Trocar)'}
+            </button>
+          </div>
+
+          <div className="mt-1.5 grid grid-cols-2 gap-1 bg-[#181922] p-1 rounded-xl border border-zinc-800">
+            <button
+              type="button"
+              onClick={() => handleChangeUserRole('mestre')}
+              className={`py-1 rounded-lg text-[10px] font-bold uppercase transition-colors cursor-pointer ${
+                userRole === 'mestre'
+                  ? 'bg-violet-600 text-white shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              👑 Mestre
+            </button>
+            <button
+              type="button"
+              onClick={() => handleChangeUserRole('jogador')}
+              className={`py-1 rounded-lg text-[10px] font-bold uppercase transition-colors cursor-pointer ${
+                userRole === 'jogador'
+                  ? 'bg-emerald-600 text-white shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              🛡️ Jogador
+            </button>
           </div>
 
           {/* Per-Player Exclusive Fog of War Vision Indicator & Character Selector */}
