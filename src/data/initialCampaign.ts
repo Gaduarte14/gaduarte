@@ -85,6 +85,11 @@ export const DEFAULT_SHEETS: CharacterSheet[] = [
     id: 'char-elara',
     nomePersonagem: 'Elara Sombralua',
     classeNivel: 'Mago 8',
+    subclasse: 'Escola de Evocação',
+    sobreClasse:
+      'Mago (8º Nível) — Conjurador Arcano (INT), Recuperação Arcana (4 níveis/dia em descanso curto), Conjuração Ritual.',
+    sobreSubclasse:
+      'Tradição Arcana: Escola de Evocação — Esculpir Magias (protege aliados em magias de área) e Truque Potente (metade do dano mesmo em sucesso no TR).',
     nivel: 8,
     antecedente: 'Sábia de Silverymoon',
     nomeJogador: 'Phap La',
@@ -247,12 +252,18 @@ export const DEFAULT_SHEETS: CharacterSheet[] = [
     avatarUrl: SVG_TOKEN_ELARA,
     visaoAlcanceQuadrados: 6,
     luzAlcanceQuadrados: 4,
+    condicoes: ['Concentrando'],
     atualizadoEm: Date.now() - 3600000,
   },
   {
     id: 'char-thorin',
     nomePersonagem: 'Thorin Escudo de Ferro',
     classeNivel: 'Paladino 8',
+    subclasse: 'Juramento da Devoção',
+    sobreClasse:
+      'Paladino (8º Nível) — Sentido Divino, Cura pelas Mãos (40 PV), Destruição Divina (Divine Smite), Aura de Proteção (+3 em salvaguardas a até 3m).',
+    sobreSubclasse:
+      'Juramento Sagrado: Juramento da Devoção — Canalizar Divindade: Arma Sagrada e Expulsar o Profano; Aura de Devoção (imune a Enfeitiçado a até 3m).',
     nivel: 8,
     antecedente: 'Soldado Veterano',
     nomeJogador: 'Kaelen',
@@ -567,7 +578,7 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           pvAtual: 26,
           pvMaximo: 26,
           ca: 15,
-          visaoQuadrados: 6, // 30ft vision
+          visaoQuadrados: 4, // 20ft vision
           luzQuadrados: 4,   // 20ft Arcane Staff light
           luzCor: '#a78bfa',
           ocultoParaJogadores: false,
@@ -579,8 +590,8 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           nome: 'Thorin Escudo de Ferro',
           categoria: 'character',
           fichaId: 'char-thorin',
-          x: 9,
-          y: 7,
+          x: 13,
+          y: 10,
           larguraQuadrados: 1,
           alturaQuadrados: 1,
           rotacao: 0,
@@ -589,7 +600,7 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           pvAtual: 62,
           pvMaximo: 68,
           ca: 19,
-          visaoQuadrados: 5, // 25ft vision
+          visaoQuadrados: 4, // 20ft vision
           luzQuadrados: 4,   // 20ft Torch light
           luzCor: '#f59e0b',
           ocultoParaJogadores: false,
@@ -601,8 +612,8 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           nome: 'Krag, Chefe Goblin',
           categoria: 'character',
           fichaId: 'char-goblin-chefe',
-          x: 13,
-          y: 6,
+          x: 14,
+          y: 5,
           larguraQuadrados: 1,
           alturaQuadrados: 1,
           rotacao: 0,
