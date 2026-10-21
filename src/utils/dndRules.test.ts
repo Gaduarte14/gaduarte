@@ -315,3 +315,163 @@ test('Token inside Fog of War is hidden from players unless within vision or car
   );
 });
 
+test('Official D&D 5e status conditions toggle, lookup, and metadata', async () => {
+  const { DND_CONDITIONS, getConditionMeta, hasConditionInList, toggleConditionInList } =
+    await import('./dndRules.ts');
+
+  assert.ok(DND_CONDITIONS.length >= 15);
+  const poisoned = getConditionMeta('envenenado');
+  assert.equal(poisoned.label, 'Envenenado');
+  assert.equal(poisoned.icon, '☠️');
+
+  const frightened = getConditionMeta('Aterrorizado');
+  assert.equal(frightened.key, 'aterrorizado');
+  assert.equal(frightened.icon, '😱');
+
+  const restrained = getConditionMeta('Imobilizado');
+  assert.equal(restrained.key, 'imobilizado');
+  assert.equal(restrained.icon, '⛓️');
+
+  let list: string[] = [];
+  list = toggleConditionInList(list, 'envenenado');
+  assert.equal(hasConditionInList(list, 'Envenenado'), true);
+  list = toggleConditionInList(list, 'aterrorizado');
+  assert.deepEqual(list, ['Envenenado', 'Aterrorizado']);
+  list = toggleConditionInList(list, 'envenenado');
+  assert.deepEqual(list, ['Aterrorizado']);
+});
+
+test('Fog of War: Torch Light (luzQuadrados) is visible to everyone while Vision (visaoQuadrados) is exclusive to the player who owns the token', () => {
+  const elaraToken: MapToken = {
+    id: 'tok-elara',
+    nome: 'Elara Sombralua',
+    categoria: 'character',
+    fichaId: 'char-elara',
+    x: 2,
+    y: 2,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#8b5cf6',
+    imagemUrl: '',
+    visaoQuadrados: 6, // 6 squares personal darkvision
+    luzQuadrados: 0, // No torch lit
+    luzCor: '#a78bfa',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+
+  const thorinWithoutTorch: MapToken = {
+    id: 'tok-thorin',
+    nome: 'Thorin Escudo de Ferro',
+    categoria: 'character',
+    fichaId: 'char-thorin',
+    x: 18,
+    y: 12,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#f59e0b',
+    imagemUrl: '',
+    visaoQuadrados: 5, // 5 squares personal vision (exclusive to Thorin!)
+    luzQuadrados: 0, // No torch lit
+    luzCor: '#f59e0b',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+
+  const goblinNearThorin: MapToken = {
+    id: 'tok-goblin',
+    nome: 'Goblin Batedor',
+    categoria: 'character',
+    x: 19,
+    y: 12,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#ef4444',
+    imagemUrl: '',
+    visaoQuadrados: 4,
+    luzQuadrados: 0,
+    luzCor: '#f59e0b',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+
+  const tokensNoTorch = [elaraToken, thorinWithoutTorch, goblinNearThorin];
+
+  // 1. When Thorin has NO torch (luzQuadrados = 0), only his vision (visaoQuadrados = 5) is active.
+  //    Player Elara does NOT see Thorin's vision circle (only her own vision circle is generated):
+  const elaraCirclesNoTorch = computeDynamicTokenVisionCircles(tokensNoTorch, 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-elara',
+  });
+  assert.equal(elaraCirclesNoTorch.length, 1);
+  assert.equal(elaraCirclesNoTorch[0].tokenId, 'tok-elara');
+  assert.equal(elaraCirclesNoTorch[0].visionRadiusPx, 6 * 64);
+
+  // 2. For Player Thorin, ONLY Thorin's vision circle is generated (not Elara's vision):
+  const thorinCirclesNoTorch = computeDynamicTokenVisionCircles(tokensNoTorch, 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-thorin',
+  });
+  assert.equal(thorinCirclesNoTorch.length, 1);
+  assert.equal(thorinCirclesNoTorch[0].tokenId, 'tok-thorin');
+  assert.equal(thorinCirclesNoTorch[0].visionRadiusPx, 5 * 64);
+
+  // 3. Goblin near Thorin is visible to Thorin (via Thorin's personal vision),
+  //    but HIDDEN in the fog for Elara (because Elara does not see Thorin's personal vision!):
+  assert.equal(
+    isTokenInsideFog(goblinNearThorin, tokensNoTorch, [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-thorin',
+    }),
+    false
+  );
+  assert.equal(
+    isTokenInsideFog(goblinNearThorin, tokensNoTorch, [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-elara',
+    }),
+    true
+  );
+
+  // 4. Now Thorin lights a Torch (`luzQuadrados: 4`)!
+  //    Because Torch Light (`[ luz ]`) is visible to EVERYONE, Elara now sees Thorin's 4-square light circle
+  //    (still NOT Thorin's 5-square personal vision) AND sees the Goblin illuminated by Thorin's torch!
+  const thorinWithTorch: MapToken = { ...thorinWithoutTorch, luzQuadrados: 4 };
+  const tokensWithTorch = [elaraToken, thorinWithTorch, goblinNearThorin];
+
+  const elaraCirclesWithTorch = computeDynamicTokenVisionCircles(tokensWithTorch, 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-elara',
+  });
+  assert.equal(elaraCirclesWithTorch.length, 2);
+  const thorinCircleForElara = elaraCirclesWithTorch.find((c) => c.tokenId === 'tok-thorin');
+  assert.ok(thorinCircleForElara);
+  assert.equal(thorinCircleForElara.visionRadiusPx, 0); // Thorin's personal vision is still hidden from Elara
+  assert.equal(thorinCircleForElara.lightRadiusPx, 4 * 64); // But Thorin's 4-square torch light is visible to everyone!
+  assert.equal(thorinCircleForElara.effectiveRadiusPx, 4 * 64);
+
+  // Both Thorin (holding the torch) and the Goblin standing in Thorin's torch light are now visible to Elara!
+  assert.equal(
+    isTokenInsideFog(thorinWithTorch, tokensWithTorch, [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-elara',
+    }),
+    false
+  );
+  assert.equal(
+    isTokenInsideFog(goblinNearThorin, tokensWithTorch, [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-elara',
+    }),
+    false
+  );
+});
+
+
+
