@@ -400,6 +400,10 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
     setRenameText('');
   };
 
+  if (!isGM) {
+    return null;
+  }
+
   return (
     <>
       <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center pointer-events-none">

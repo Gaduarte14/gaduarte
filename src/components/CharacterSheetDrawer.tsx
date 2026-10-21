@@ -24,6 +24,7 @@ import type {
 } from '../types/vtt.ts';
 import {
   ABILITY_LABELS,
+  DND_CONDITIONS,
   DND_SKILLS,
   calculateAbilityModifier,
   calculateInitiativeModifier,
@@ -33,6 +34,9 @@ import {
   calculateSpellAttackBonus,
   calculateSpellSaveDC,
   formatModifier,
+  getConditionMeta,
+  hasConditionInList,
+  toggleConditionInList,
 } from '../utils/dndRules.ts';
 
 interface CharacterSheetDrawerProps {
@@ -275,14 +279,26 @@ export const CharacterSheetDrawer: React.FC<CharacterSheetDrawerProps> = ({
                 <span className="text-xs text-zinc-400 font-mono">· DUNGEONS & DRAGONS 5E</span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 mt-1.5 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-7 gap-2 mt-1.5 text-xs">
                 <div>
                   <span className="text-[10px] text-zinc-400 block">CLASSE E NÍVEL</span>
                   <input
                     type="text"
+                    aria-label="Classe e Nível"
                     value={sheet.classeNivel}
                     onChange={(e) => updateField('classeNivel', e.target.value)}
                     className="bg-[#14151c] border border-zinc-800 rounded px-2 py-0.5 text-zinc-200 w-full"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] text-violet-300 font-semibold block">SUBCLASSE</span>
+                  <input
+                    type="text"
+                    aria-label="Subclasse"
+                    placeholder="Ex: Evocação, Campeão..."
+                    value={sheet.subclasse || ''}
+                    onChange={(e) => updateField('subclasse', e.target.value)}
+                    className="bg-[#14151c] border border-violet-500/40 rounded px-2 py-0.5 text-violet-200 w-full"
                   />
                 </div>
                 <div>
@@ -818,6 +834,115 @@ export const CharacterSheetDrawer: React.FC<CharacterSheetDrawerProps> = ({
                   </div>
                 </div>
 
+                {/* CONDIÇÕES DE STATUS (D&D 5E OFICIAL) — Sincroniza Ícones sobre o Token no Mapa Tático */}
+                <div
+                  className="bg-[#1d1f2a] border border-zinc-700/80 rounded-xl p-3.5 space-y-2.5"
+                  data-testid="sheet-conditions-panel"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                        Condições de Status (D&D 5e)
+                      </h3>
+                      <span className="text-[10px] text-zinc-400 block">
+                        Aplica ícones visuais diretamente sobre o token no mapa tático
+                      </span>
+                    </div>
+                    {(sheet.condicoes?.length || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => updateField('condicoes', [])}
+                        className="px-2 py-0.5 rounded bg-rose-950/70 hover:bg-rose-800 border border-rose-500/40 text-[10px] font-semibold text-rose-300 hover:text-white transition-colors cursor-pointer"
+                        title="Remover todas as condições ativas"
+                      >
+                        Limpar ({sheet.condicoes?.length})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Grid of 16 Official D&D 5e Conditions */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                    {DND_CONDITIONS.map((cond) => {
+                      const active = hasConditionInList(sheet.condicoes, cond.key);
+                      return (
+                        <button
+                          key={cond.key}
+                          type="button"
+                          onClick={() =>
+                            updateField(
+                              'condicoes',
+                              toggleConditionInList(sheet.condicoes, cond.key)
+                            )
+                          }
+                          title={`${cond.label} (${cond.englishName}): ${cond.resumo}`}
+                          aria-pressed={active}
+                          data-testid={`condition-btn-${cond.key}`}
+                          className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left text-[11px] font-medium transition-all cursor-pointer ${
+                            active
+                              ? 'bg-zinc-900 text-white shadow-md ring-1'
+                              : 'bg-[#14151c] border-zinc-800/90 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                          }`}
+                          style={
+                            active
+                              ? {
+                                  borderColor: cond.color,
+                                  boxShadow: `0 0 10px -2px ${cond.color}55`,
+                                }
+                              : undefined
+                          }
+                        >
+                          <span className="text-sm leading-none shrink-0">{cond.icon}</span>
+                          <span className="truncate">{cond.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Active Conditions Mechanical Summary List */}
+                  {(sheet.condicoes?.length || 0) > 0 && (
+                    <div className="pt-2 border-t border-zinc-800/90 space-y-1">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 block">
+                        Efeitos Ativos no Token ({sheet.condicoes?.length}):
+                      </span>
+                      <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                        {(sheet.condicoes || []).map((cName) => {
+                          const meta = getConditionMeta(cName);
+                          return (
+                            <div
+                              key={meta.key}
+                              className="flex items-start justify-between gap-2 px-2 py-1 rounded bg-[#14151c] border border-zinc-800 text-[11px]"
+                            >
+                              <div className="min-w-0">
+                                <span
+                                  className="font-bold mr-1"
+                                  style={{ color: meta.color }}
+                                >
+                                  {meta.icon} {meta.label}:
+                                </span>
+                                <span className="text-zinc-300">{meta.resumo}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateField(
+                                    'condicoes',
+                                    toggleConditionInList(sheet.condicoes, meta.key)
+                                  )
+                                }
+                                className="text-zinc-500 hover:text-rose-400 shrink-0 cursor-pointer"
+                                title={`Remover ${meta.label}`}
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* ATAQUES E MAGIAS */}
                 <div className="bg-[#1d1f2a] border border-zinc-700/80 rounded-xl p-3.5">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2.5">
@@ -1057,12 +1182,12 @@ export const CharacterSheetDrawer: React.FC<CharacterSheetDrawerProps> = ({
                 {/* Dynamic Token Vision & Light Configuration */}
                 <div className="bg-[#1d1f2a] border border-amber-500/30 rounded-xl p-3.5">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-amber-300 mb-2">
-                    Visão & Luz do Token na Névoa de Guerra
+                    Visão (Exclusiva) & Luz de Tocha (Pública) na Névoa
                   </h3>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div>
                       <label className="text-zinc-400 block mb-1">
-                        Alcance de Visão (Quadrados 5ft)
+                        Visão Pessoal (Só Você Vê)
                       </label>
                       <input
                         type="number"
@@ -1075,7 +1200,7 @@ export const CharacterSheetDrawer: React.FC<CharacterSheetDrawerProps> = ({
                     </div>
                     <div>
                       <label className="text-zinc-400 block mb-1">
-                        Luz Emitida / Tocha (Quadrados)
+                        Luz / Tocha (Todos Veem)
                       </label>
                       <input
                         type="number"
@@ -1086,6 +1211,80 @@ export const CharacterSheetDrawer: React.FC<CharacterSheetDrawerProps> = ({
                         className="w-full px-2.5 py-1.5 font-mono tabular-nums bg-[#14151c] border border-zinc-700 rounded text-amber-300"
                       />
                     </div>
+                  </div>
+                </div>
+
+                {/* 2 ESPAÇOS DEDICADOS: SOBRE A CLASSE & SOBRE A SUBCLASSE */}
+                <div
+                  className="bg-[#1d1f2a] border border-violet-500/35 rounded-xl p-3.5 space-y-3"
+                  data-testid="sheet-class-subclass-section"
+                >
+                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-violet-300">
+                      Classe & Subclasse (D&D 5e)
+                    </h3>
+                    <span className="text-[10px] font-mono text-zinc-400">
+                      {sheet.classeNivel}
+                      {sheet.subclasse ? ` · ${sheet.subclasse}` : ''}
+                    </span>
+                  </div>
+
+                  {/* Espaço 1: Sobre a Classe */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="sheet-sobre-classe"
+                        className="text-[10px] font-bold uppercase tracking-wider text-zinc-300"
+                      >
+                        1. Sobre a Classe ({sheet.classeNivel || 'Classe'})
+                      </label>
+                      <input
+                        type="text"
+                        aria-label="Nome da Classe e Nível"
+                        placeholder="Ex: Guerreiro 5"
+                        value={sheet.classeNivel}
+                        onChange={(e) => updateField('classeNivel', e.target.value)}
+                        className="w-36 px-2 py-0.5 text-[11px] bg-[#14151c] border border-zinc-700 rounded text-zinc-100 focus:outline-none focus:border-violet-500"
+                      />
+                    </div>
+                    <textarea
+                      id="sheet-sobre-classe"
+                      aria-label="Sobre a Classe"
+                      rows={3}
+                      placeholder="Anote aqui as características, proficiências, recursos e habilidades principais da sua Classe..."
+                      value={sheet.sobreClasse || ''}
+                      onChange={(e) => updateField('sobreClasse', e.target.value)}
+                      className="w-full p-2 text-xs bg-[#14151c] border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-violet-500"
+                    />
+                  </div>
+
+                  {/* Espaço 2: Sobre a Subclasse */}
+                  <div className="space-y-1.5 pt-2 border-t border-zinc-800/80">
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="sheet-sobre-subclasse"
+                        className="text-[10px] font-bold uppercase tracking-wider text-violet-300"
+                      >
+                        2. Sobre a Subclasse ({sheet.subclasse || 'Subclasse'})
+                      </label>
+                      <input
+                        type="text"
+                        aria-label="Nome da Subclasse"
+                        placeholder="Ex: Mestre de Batalha"
+                        value={sheet.subclasse || ''}
+                        onChange={(e) => updateField('subclasse', e.target.value)}
+                        className="w-36 px-2 py-0.5 text-[11px] bg-[#14151c] border border-violet-500/40 rounded text-violet-200 focus:outline-none focus:border-violet-400"
+                      />
+                    </div>
+                    <textarea
+                      id="sheet-sobre-subclasse"
+                      aria-label="Sobre a Subclasse"
+                      rows={3}
+                      placeholder="Anote aqui o arquétipo, tradição arcana, juramento ou círculo e as habilidades da sua Subclasse..."
+                      value={sheet.sobreSubclasse || ''}
+                      onChange={(e) => updateField('sobreSubclasse', e.target.value)}
+                      className="w-full p-2 text-xs bg-[#14151c] border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-violet-500"
+                    />
                   </div>
                 </div>
 

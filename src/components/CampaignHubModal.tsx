@@ -314,7 +314,7 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
           <div className="absolute bottom-0 inset-x-0 px-6 py-4 flex flex-col gap-2.5">
             <div>
               <span className="text-xs font-mono uppercase tracking-widest text-violet-300">
-                SALA SINCRONIZADA · {campaign.codigoSala} · {campaign.calendarioFantasia}
+                SALA SINCRONIZADA · {campaign.codigoSala}
               </span>
               <div className="mt-0.5 flex items-center gap-2">
                 <input

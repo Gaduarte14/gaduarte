@@ -164,7 +164,7 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
     try {
       const textWithVars =
         rawText.includes('{') && activeSheet
-          ? interpolateSheetVariables(rawText, activeSheet).resolvedFormula
+          ? interpolateSheetVariables(rawText, activeSheet)
           : rawText;
 
       const parsedRolls = rollInput(textWithVars, diceMode);

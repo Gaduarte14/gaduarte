@@ -9,9 +9,17 @@ import {
   Lock,
   Unlock,
   Edit3,
+  Sparkles,
 } from 'lucide-react';
 import type { CharacterSheet, MapDrawing, MapScene, MapToken } from '../types/vtt.ts';
-import { computeDynamicTokenVisionCircles, isTokenInsideFog } from '../utils/dndRules.ts';
+import {
+  DND_CONDITIONS,
+  computeDynamicTokenVisionCircles,
+  getConditionMeta,
+  hasConditionInList,
+  isTokenInsideFog,
+  toggleConditionInList,
+} from '../utils/dndRules.ts';
 
 export type ActiveMapTool = 'hand' | 'select' | 'fog' | 'draw' | 'measure' | 'pointer' | 'text';
 
@@ -19,6 +27,7 @@ interface TacticalMapCanvasProps {
   scene: MapScene;
   sheets: CharacterSheet[];
   userRole: 'mestre' | 'jogador';
+  activePlayingSheetId?: string | null;
   activeTool: ActiveMapTool;
   zoom: number;
   pan: { x: number; y: number };
@@ -40,6 +49,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   scene,
   sheets,
   userRole,
+  activePlayingSheetId,
   activeTool,
   zoom,
   pan,
@@ -70,6 +80,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   } | null>(null);
   const lastLiveBroadcastRef = useRef<number>(0);
 
+  // Quick condition popover on selected token HUD
+  const [showHudConditions, setShowHudConditions] = useState(false);
+
   // Ruler measurement state
   const [measurePoints, setMeasurePoints] = useState<{
     startX: number;
@@ -93,7 +106,18 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     );
   }, [scene.tokens, liveDragPos]);
 
+  const fogViewerOptions = useMemo(
+    () => ({
+      viewerRole: userRole,
+      viewerSheetId: activePlayingSheetId || null,
+      viewerTokenId: selectedTokenId || null,
+    }),
+    [userRole, activePlayingSheetId, selectedTokenId]
+  );
+
   // Render Dynamic Fog of War & Token Torch Light on Canvas whenever tokens move!
+  // - Mestre ('mestre'): sees everything (semi-transparent fog + all tokens' vision/light circles).
+  // - Jogador ('jogador'): ONLY sees where their OWN character's token illuminates! Other players' tokens do not reveal fog for them.
   useEffect(() => {
     const canvas = fogCanvasRef.current;
     if (!canvas) return;
@@ -104,13 +128,20 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
     if (!scene.nevoaAtiva) return;
 
-    // 1. Fill map with Owlbear dark atmospheric fog
+    // 1. Fill map with Owlbear atmospheric fog:
+    //    - Mestre sees through the fog (0.58 alpha) so they see the entire map and all tokens.
+    //    - Jogador gets opaque fog (0.96 alpha) so they only see where their own token illuminates.
     ctx.save();
-    ctx.fillStyle = 'rgba(10, 11, 16, 0.88)';
+    ctx.fillStyle =
+      userRole === 'mestre' ? 'rgba(10, 11, 16, 0.58)' : 'rgba(7, 8, 12, 0.96)';
     ctx.fillRect(0, 0, mapWidthPx, mapHeightPx);
 
-    // 2. Cut out vision and light circles dynamically based on live token positions
-    const circles = computeDynamicTokenVisionCircles(effectiveTokens, gridSize, sheets);
+    // 2. Cut out vision and light circles dynamically based on viewer role & player's own token
+    const circles = computeDynamicTokenVisionCircles(
+      effectiveTokens,
+      gridSize,
+      fogViewerOptions
+    );
     ctx.globalCompositeOperation = 'destination-out';
 
     for (const c of circles) {
@@ -132,7 +163,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       ctx.fill();
     }
 
-    // Also cut out any manually revealed fog areas
+    // Also cut out any manually GM-revealed fog areas
     for (const poly of scene.nevoaAreasManuais || []) {
       if (poly.revelado) {
         ctx.fillStyle = 'rgba(0,0,0,1)';
@@ -140,7 +171,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       }
     }
 
-    // 3. Draw warm ambient torch/arcane light tint where tokens emit light
+    // 3. Draw warm ambient torch/arcane light tint where visible tokens emit light
     ctx.globalCompositeOperation = 'source-over';
     for (const c of circles) {
       if (c.lightRadiusPx <= 0) continue;
@@ -162,7 +193,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     }
 
     ctx.restore();
-  }, [effectiveTokens, scene.nevoaAtiva, scene.nevoaAreasManuais, sheets, mapWidthPx, mapHeightPx, gridSize]);
+  }, [
+    effectiveTokens,
+    scene.nevoaAtiva,
+    scene.nevoaAreasManuais,
+    sheets,
+    mapWidthPx,
+    mapHeightPx,
+    gridSize,
+    userRole,
+    fogViewerOptions,
+  ]);
 
   // Convert client mouse coordinates to map pixel coordinates
   const clientToMapCoords = (clientX: number, clientY: number) => {
@@ -506,9 +547,18 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           className="absolute inset-0 pointer-events-none z-20"
         />
 
-        {/* Interactive Tokens Layer — Hides tokens inside Fog of War from Players (Only GM sees them!) */}
+        {/* Interactive Tokens Layer — Hides tokens outside the Player's OWN token illumination (Only GM sees everything!) */}
         {effectiveTokens.map((token) => {
-          const insideFog = isTokenInsideFog(
+          const insidePlayerFog = isTokenInsideFog(
+            token,
+            effectiveTokens,
+            sheets,
+            scene.nevoaAtiva,
+            gridSize,
+            fogViewerOptions
+          );
+
+          const insideGlobalFogForGmBadge = isTokenInsideFog(
             token,
             effectiveTokens,
             sheets,
@@ -516,8 +566,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             gridSize
           );
 
-          // If the user is a Player ('jogador') and the token has entered the Fog of War (without light), hide it completely!
-          if (userRole === 'jogador' && insideFog) {
+          // If the user is a Player ('jogador') and the token is outside their OWN token's illumination, hide it!
+          if (userRole === 'jogador' && insidePlayerFog) {
             return null;
           }
 
@@ -533,6 +583,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           const hpMax = linkedSheet?.pvMaximo ?? token.pvMaximo;
           const hpTemp = linkedSheet?.pvTemporario ?? 0;
           const acVal = linkedSheet?.classeArmadura ?? token.ca;
+          const activeConditions =
+            linkedSheet?.condicoes !== undefined
+              ? linkedSheet.condicoes
+              : token.condicoes || [];
           const hpPercent =
             hpCur !== undefined && hpMax
               ? Math.max(0, Math.min(100, Math.round((hpCur / hpMax) * 100)))
@@ -574,8 +628,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               className={`absolute z-30 group cursor-grab active:cursor-grabbing ${
                 isSelected ? 'ring-3 ring-violet-400 rounded-full shadow-2xl' : ''
               } ${isTurnToken ? 'ring-3 ring-amber-400 rounded-full' : ''} ${
-                insideFog && userRole === 'mestre'
-                  ? 'opacity-65 ring-2 ring-amber-500/80 rounded-full'
+                insideGlobalFogForGmBadge && userRole === 'mestre'
+                  ? 'opacity-75 ring-2 ring-amber-500/80 rounded-full'
                   : ''
               }`}
               role="button"
@@ -593,7 +647,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 </div>
               )}
 
-              {/* Token Torch / Light Halo Indicator */}
+              {/* Token Torch / Light Halo Indicator (Visible to everyone because it is a torch light!) */}
               {token.luzQuadrados > 0 && (
                 <div
                   className="absolute -inset-2 rounded-full pointer-events-none animate-pulse"
@@ -604,7 +658,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               )}
 
               {/* GM-only Badge when token is hidden inside the Fog of War */}
-              {insideFog && userRole === 'mestre' && !isTurnToken && (
+              {insideGlobalFogForGmBadge && userRole === 'mestre' && !isTurnToken && (
                 <div
                   className="absolute -top-9 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-amber-950/90 border border-amber-500/70 text-[9px] font-mono text-amber-300 flex items-center gap-0.5 whitespace-nowrap pointer-events-none shadow"
                   title="Este token está dentro da Névoa de Guerra: Oculto para Jogadores (Somente o Mestre vê)"
@@ -621,6 +675,32 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 className="w-full h-full rounded-full object-cover border-2 shadow-lg pointer-events-none"
                 style={{ borderColor: token.cor || '#8b5cf6' }}
               />
+
+              {/* Visual D&D 5e Status Condition Badges Overlay on Token */}
+              {activeConditions.length > 0 && (
+                <div
+                  className="absolute -right-2 -bottom-1 z-40 flex flex-wrap justify-end gap-0.5 max-w-[78px] pointer-events-auto"
+                  data-testid={`token-conditions-${token.id}`}
+                >
+                  {activeConditions.map((condStr) => {
+                    const meta = getConditionMeta(condStr);
+                    return (
+                      <span
+                        key={meta.key}
+                        title={`${meta.label} (${meta.englishName}): ${meta.resumo}`}
+                        data-testid={`token-condition-badge-${meta.key}`}
+                        className="w-5 h-5 rounded-full bg-zinc-950/95 border flex items-center justify-center text-[11px] leading-none shadow-md"
+                        style={{
+                          borderColor: meta.color,
+                          boxShadow: `0 0 6px ${meta.color}88`,
+                        }}
+                      >
+                        {meta.icon}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* HP Bar & AC Badge Above Token */}
               {hpPercent !== null && (
@@ -653,10 +733,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         })}
       </div>
 
-      {/* Selected Token Context HUD Popover (Rename, Edit Light/Vision/Size, Open Linked Sheet, Delete) */}
+      {/* Selected Token Context HUD Popover (Rename, Edit Light/Vision/Size, Conditions, Open Linked Sheet, Delete) */}
       {selectedToken &&
         (userRole === 'mestre' ||
-          !isTokenInsideFog(selectedToken, effectiveTokens, sheets, scene.nevoaAtiva, gridSize)) && (
+          !isTokenInsideFog(
+            selectedToken,
+            effectiveTokens,
+            sheets,
+            scene.nevoaAtiva,
+            gridSize,
+            fogViewerOptions
+          )) && (
           <div
             className="fixed top-3 left-1/2 -translate-x-1/2 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3.5 py-2 flex flex-wrap items-center gap-2.5 text-xs text-zinc-100 max-w-[92vw]"
             role="toolbar"
@@ -693,10 +780,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               </div>
             </div>
 
-            {/* Light Source Radius (Add Torch / Luz ao Personagem) */}
+            {/* Light Source Radius (Add Torch / Luz ao Personagem — Visible to Everyone!) */}
             <div
               className="flex items-center gap-1.5"
-              title="Adicionar/Ajustar Luz no Personagem (revela na Névoa)"
+              title="Luz de Tocha (Visível para TODOS os jogadores na Névoa)"
             >
               <Flame className="w-4 h-4 text-amber-400" />
               <span className="text-zinc-300">Luz:</span>
@@ -734,10 +821,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               />
             </div>
 
-            {/* Vision Radius in Fog of War */}
+            {/* Vision Radius in Fog of War (Exclusive to Own Player & GM) */}
             <div
               className="flex items-center gap-1.5"
-              title="Alcance de Visão do Personagem na Névoa"
+              title="Visão Exclusiva do Personagem (Somente o próprio jogador e o Mestre veem)"
             >
               <Eye className="w-4 h-4 text-violet-400" />
               <span className="text-zinc-300">Visão:</span>
@@ -755,6 +842,57 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 }
                 className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-violet-300"
               />
+            </div>
+
+            {/* Quick D&D 5e Conditions Selector on Token HUD */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowHudConditions((p) => !p)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer border ${
+                  (selectedToken.condicoes?.length || 0) > 0
+                    ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                    : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:text-white'
+                }`}
+                title="Gerenciar Condições de Status (D&D 5e) no Token"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Condições
+                {(selectedToken.condicoes?.length || 0) > 0
+                  ? ` (${selectedToken.condicoes.length})`
+                  : ''}
+              </button>
+              {showHudConditions && (
+                <div className="absolute top-9 left-0 z-50 w-72 bg-[#181922] border border-zinc-700 rounded-xl shadow-2xl p-2.5 grid grid-cols-2 gap-1">
+                  {DND_CONDITIONS.map((cond) => {
+                    const active = hasConditionInList(selectedToken.condicoes, cond.key);
+                    return (
+                      <button
+                        key={cond.key}
+                        type="button"
+                        onClick={() =>
+                          onUpdateToken({
+                            ...selectedToken,
+                            condicoes: toggleConditionInList(
+                              selectedToken.condicoes,
+                              cond.key
+                            ),
+                          })
+                        }
+                        title={`${cond.label}: ${cond.resumo}`}
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium cursor-pointer ${
+                          active
+                            ? 'bg-zinc-900 text-white border-amber-400'
+                            : 'bg-[#12131a] border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        <span>{cond.icon}</span>
+                        <span className="truncate">{cond.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Token Size Selector (1x1, 2x2, 3x3) */}
