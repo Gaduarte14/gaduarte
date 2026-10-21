@@ -101,6 +101,9 @@ export interface CharacterSheet {
   id: string;
   nomePersonagem: string;
   classeNivel: string;
+  subclasse?: string;
+  sobreClasse?: string;
+  sobreSubclasse?: string;
   nivel: number;
   antecedente: string;
   nomeJogador: string;
@@ -155,8 +158,36 @@ export interface CharacterSheet {
   avatarUrl: string;
   visaoAlcanceQuadrados: number; // e.g. 6 squares (30ft)
   luzAlcanceQuadrados: number; // e.g. 4 squares (20ft torch)
+  condicoes?: string[]; // Active D&D 5e status condition keys/labels synced with map token
   ehMestreOculto?: boolean;
   atualizadoEm: number;
+}
+
+export type DndConditionKey =
+  | 'envenenado'
+  | 'aterrorizado'
+  | 'imobilizado'
+  | 'agarrado'
+  | 'atordoado'
+  | 'caido'
+  | 'cego'
+  | 'enfeiticado'
+  | 'incapacitado'
+  | 'inconsciente'
+  | 'invisivel'
+  | 'paralisado'
+  | 'petrificado'
+  | 'surdo'
+  | 'exaustao'
+  | 'concentrando';
+
+export interface DndConditionDefinition {
+  key: DndConditionKey;
+  label: string;
+  englishName: string;
+  icon: string;
+  color: string;
+  resumo: string;
 }
 
 export type DockCategory =
