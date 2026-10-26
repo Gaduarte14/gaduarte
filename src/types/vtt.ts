@@ -160,6 +160,8 @@ export interface CharacterSheet {
   luzAlcanceQuadrados: number; // e.g. 4 squares (20ft torch)
   condicoes?: string[]; // Active D&D 5e status condition keys/labels synced with map token
   ehMestreOculto?: boolean;
+  ocupadoPorSessionId?: string | null; // Strict 1-player-per-sheet lock (sessionId of the player who selected this sheet)
+  ocupadoPorNome?: string | null; // Display name of the player occupying this sheet
   atualizadoEm: number;
 }
 
@@ -226,6 +228,7 @@ export interface ExploredFogCircle {
   x: number; // Grid center X coordinate
   y: number; // Grid center Y coordinate
   raioQuadrados: number; // Illuminated/seen radius in grid squares
+  falloff?: number; // Smooth attenuation factor (0 = uniform, 0.5 = natural default, 1 = fast decay)
 }
 
 export interface MapToken {
@@ -246,6 +249,7 @@ export interface MapToken {
   visaoQuadrados: number; // Token darkvision / sight radius in grid squares
   luzQuadrados: number; // Token light source radius (e.g., Torch = 4 squares / 20ft)
   luzCor: string;
+  luzFalloff?: number; // Smooth light falloff (0 = uniform to 1 = fast decay, default 0.5)
   ehFonteDeLuz?: boolean; // True when placed via the [Luz] map tool (100% invisible token emitting light)
   memoriaExplorada?: ExploredFogCircle[]; // Explored fog-of-war trail remembered for this token
   ocultoParaJogadores: boolean;
@@ -273,6 +277,16 @@ export interface FogPolygon {
   revelado: boolean; // true = manually revealed area, false = manually hidden area
 }
 
+export interface MapWallSegment {
+  id: string;
+  x1: number; // Grid coordinate X1
+  y1: number; // Grid coordinate Y1
+  x2: number; // Grid coordinate X2
+  y2: number; // Grid coordinate Y2
+  tipo: 'parede' | 'porta';
+  aberta?: boolean; // Only for 'porta': true = light & tokens pass; false = blocks light & tokens
+}
+
 export interface MapScene {
   id: string;
   nome: string;
@@ -292,6 +306,8 @@ export interface MapScene {
   snappingAtivo?: boolean;
   nevoaAtiva: boolean;
   iluminacaoDinamicaAtiva: boolean;
+  colisaoParedesAtiva?: boolean; // Enables wall collision & 2D raycast light/vision occlusion
+  paredes?: MapWallSegment[]; // Solid walls and openable/closable doors in grid coordinates
   nevoaAreasManuais: FogPolygon[];
   tokens: MapToken[];
   desenhos: MapDrawing[];

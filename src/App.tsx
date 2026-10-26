@@ -23,6 +23,11 @@ import {
   LayoutGrid,
   Lock,
   BookOpen,
+  BrickWall,
+  DoorOpen,
+  Copy,
+  KeyRound,
+  Check,
 } from 'lucide-react';
 import { INITIAL_CAMPAIGN_STATE } from './data/initialCampaign.ts';
 import type {
@@ -34,6 +39,7 @@ import type {
   MapDrawing,
   MapScene,
   MapToken,
+  MapWallSegment,
   MediaAsset,
   MusicFolder,
   MusicTrack,
@@ -41,6 +47,7 @@ import type {
 import {
   createInvisibleLightToken,
   evaluateDiceExpression,
+  insertWallOrDoorSegment,
   interpolateSheetVariables,
   recordTokenFogMemoryPath,
   recordTokenFogMemoryStep,
@@ -53,11 +60,24 @@ import {
   type DamageHistoryEntry,
   type SheetHpAdapter,
 } from './utils/dano.ts';
+import {
+  canUserOpenCharacterSheet,
+  claimCharacterSheetForPlayer,
+  getVisibleSheetsForTabletopPlayer,
+  releaseCharacterSheetLock,
+  resolveRoomRoleForEntry,
+} from './utils/roomAccessEngine.ts';
 import { TacticalMapCanvas, type ActiveMapTool } from './components/TacticalMapCanvas.tsx';
 import { BottomOwlbearDock } from './components/BottomOwlbearDock.tsx';
 import { RightQuestPortalSidebar } from './components/RightQuestPortalSidebar.tsx';
 import { CharacterSheetDrawer } from './components/CharacterSheetDrawer.tsx';
 import { CampaignHubModal } from './components/CampaignHubModal.tsx';
+import {
+  OwlbearRoomsScreen,
+  loadSavedOwlbearRooms,
+  saveOwlbearRooms,
+  type OwlbearRoomItem,
+} from './components/OwlbearRoomsScreen.tsx';
 import { PersistentAudioEngine } from './components/PersistentAudioEngine.tsx';
 
 const LOCAL_STORAGE_KEY = 'owlbear_quest_vtt_state_v1';
@@ -93,8 +113,20 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && Array.isArray(parsed.cenas) && Array.isArray(parsed.fichas)) {
+          const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
+          const hydratedCenas = parsed.cenas.map((c: MapScene) => {
+            if (c.id === 'scene-crypt' && (!c.paredes || c.paredes.length === 0)) {
+              return {
+                ...c,
+                colisaoParedesAtiva: c.colisaoParedesAtiva ?? true,
+                paredes: defaultCrypt.paredes,
+              };
+            }
+            return c;
+          });
           return {
             ...parsed,
+            cenas: hydratedCenas,
             mestreSessionId: null,
             mestreNome: 'Phap La (you)',
             logsCombate: INITIAL_CAMPAIGN_STATE.logsCombate,
@@ -111,11 +143,34 @@ export default function App() {
     };
   });
 
-  // UI Navigation States: Start on Initial Campaign Hub unless ?autostart=1 or ?tabletop=1 is set
+  // Owlbear Rodeo Rooms State (Tela Inicial de Salas)
+  const [owlbearRooms, setOwlbearRooms] = useState<OwlbearRoomItem[]>(() =>
+    loadSavedOwlbearRooms(
+      campaign.nomeCampanha,
+      campaign.codigoSala,
+      campaign.capaCampanhaUrl
+    )
+  );
+
+  // UI Navigation States:
+  // Normal flow: Tela Inicial de Salas (`showRoomsScreen`) -> Campaign Hub (`showCampaignHub`) -> Mesa Tática
+  const [showRoomsScreen, setShowRoomsScreen] = useState<boolean>(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (
+      params.get('autostart') === '1' ||
+      params.get('tabletop') === '1' ||
+      params.get('hub') === '1'
+    ) {
+      return false;
+    }
+    return true;
+  });
+
   const [showCampaignHub, setShowCampaignHub] = useState<boolean>(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('autostart') === '1' || params.get('tabletop') === '1') return false;
-    return true;
+    if (params.get('hub') === '1') return true;
+    return false;
   });
 
   const [activeSheetModalId, setActiveSheetModalId] = useState<string | null>(null);
@@ -123,9 +178,8 @@ export default function App() {
     INITIAL_CAMPAIGN_STATE.fichas[0]?.id || 'char-elara'
   );
   const [damageHistory, setDamageHistory] = useState<DamageHistoryEntry[]>([]);
-
-  // Never block switching between Mestre and Jogador
-  const isGmSlotTakenByAnother = false;
+  const [sheetClaimError, setSheetClaimError] = useState<string>('');
+  const [copiedTabletopCode, setCopiedTabletopCode] = useState<boolean>(false);
 
   const [userRole, setUserRoleState] = useState<'mestre' | 'jogador'>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -160,8 +214,11 @@ export default function App() {
     'chat' | 'iniciativa' | 'musica' | 'fichas' | 'notas'
   >('chat');
 
-  // Undo/Redo Drawing Stack
+  // Undo/Redo Drawing Stack & Single-Step Wall Batch Undo Stack (Ctrl+Z)
   const [redoDrawings, setRedoDrawings] = useState<MapDrawing[]>([]);
+  const [wallUndoStack, setWallUndoStack] = useState<
+    Array<{ sceneId: string; previousWalls: MapWallSegment[] }>
+  >([]);
 
   // WebSocket & BroadcastChannel Real-Time Sync Refs
   const wsRef = useRef<WebSocket | null>(null);
@@ -260,17 +317,24 @@ export default function App() {
     }
   };
 
-  // Sync state to localStorage (excluding transient roll logs per Section 7) + BroadcastChannel + WebSocket
-  const commitCampaignState = (updater: (prev: CampaignState) => CampaignState) => {
-    setCampaign((prev) => {
-      const next = updater(prev);
-      next.nomesCampanha = syncCampaignCharacterNames(next.nomesCampanha || [], next.fichas || []);
+  // 60 FPS Optimization: Debounce localStorage serialization so dragging/panning/doors never stall the main thread
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
       try {
-        const persistedCopy = { ...next, logsCombate: [] };
+        const persistedCopy = { ...campaign, logsCombate: [] };
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(persistedCopy));
       } catch {
         // ignore quota errors
       }
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [campaign]);
+
+  // Sync state to BroadcastChannel + WebSocket (localStorage is persisted asynchronously above for locked 60 FPS)
+  const commitCampaignState = (updater: (prev: CampaignState) => CampaignState) => {
+    setCampaign((prev) => {
+      const next = updater(prev);
+      next.nomesCampanha = syncCampaignCharacterNames(next.nomesCampanha || [], next.fichas || []);
       if (!isRemoteUpdateRef.current) {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: 'campaign:update', payload: next }));
@@ -282,6 +346,43 @@ export default function App() {
       return next;
     });
   };
+
+  // Single-step Undo for Wall Batches & Manual Wall edits (Ctrl+Z)
+  const handleUndoWalls = useCallback(() => {
+    if (userRole !== 'mestre') return;
+    setWallUndoStack((prevStack) => {
+      if (prevStack.length === 0) return prevStack;
+      const lastEntry = prevStack[prevStack.length - 1];
+      commitCampaignState((prev) => ({
+        ...prev,
+        cenas: prev.cenas.map((c) =>
+          c.id === lastEntry.sceneId
+            ? { ...c, paredes: lastEntry.previousWalls }
+            : c
+        ),
+      }));
+      return prevStack.slice(0, -1);
+    });
+  }, [userRole]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 'z' &&
+        !e.shiftKey &&
+        userRole === 'mestre' &&
+        wallUndoStack.length > 0
+      ) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        handleUndoWalls();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [userRole, wallUndoStack.length, handleUndoWalls]);
 
   /**
    * Section 7: Isolated pushRoll(entry) function.
@@ -360,8 +461,21 @@ export default function App() {
             if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
               if (msg.payload) {
                 isRemoteUpdateRef.current = true;
+                const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
+                const incomingCenas = Array.isArray(msg.payload.cenas)
+                  ? msg.payload.cenas.map((c: MapScene) =>
+                      c.id === 'scene-crypt' && (!c.paredes || c.paredes.length === 0)
+                        ? {
+                            ...c,
+                            colisaoParedesAtiva: c.colisaoParedesAtiva ?? true,
+                            paredes: defaultCrypt.paredes,
+                          }
+                        : c
+                    )
+                  : [];
                 setCampaign((prev) => ({
                   ...msg.payload,
+                  cenas: incomingCenas.length > 0 ? incomingCenas : prev.cenas,
                   mestreSessionId: msg.payload.mestreSessionId ?? prev.mestreSessionId,
                   mestreNome: msg.payload.mestreNome ?? prev.mestreNome,
                 }));
@@ -453,14 +567,6 @@ export default function App() {
             : c
         ),
       };
-      try {
-        localStorage.setItem(
-          LOCAL_STORAGE_KEY,
-          JSON.stringify({ ...next, logsCombate: [] })
-        );
-      } catch {
-        // ignore
-      }
       if (bcRef.current) {
         bcRef.current.postMessage({ type: 'campaign:state', payload: next });
       }
@@ -575,12 +681,69 @@ export default function App() {
     });
   };
 
+  const handleOpenSheetGuarded = (sheetId: string) => {
+    const targetSheet = campaign.fichas.find((f) => f.id === sheetId);
+    if (!canUserOpenCharacterSheet(targetSheet, userRole, activePlayingSheetId, sessionId)) {
+      return;
+    }
+    setActiveSheetModalId(sheetId);
+  };
+
+  const handleSelectAndClaimSheet = (sheetId: string) => {
+    const claimResult = claimCharacterSheetForPlayer(
+      campaign.fichas,
+      sheetId,
+      sessionId,
+      userName,
+      userRole
+    );
+    if (!claimResult.claimed) {
+      setSheetClaimError(claimResult.error || 'Esta ficha já está ocupada por outro jogador.');
+      return;
+    }
+    setSheetClaimError('');
+    setActivePlayingSheetId(sheetId);
+    const ownTok = activeScene.tokens.find((t) => t.fichaId === sheetId);
+    if (ownTok) {
+      setSelectedTokenId(ownTok.id);
+    }
+    if (userRole === 'jogador') {
+      commitCampaignState((prev) => {
+        const res = claimCharacterSheetForPlayer(
+          prev.fichas,
+          sheetId,
+          sessionId,
+          userName,
+          userRole
+        );
+        return res.claimed ? { ...prev, fichas: res.updatedSheets } : prev;
+      });
+    }
+  };
+
+  const handleReleaseSheetLock = (sheetId: string) => {
+    setSheetClaimError('');
+    commitCampaignState((prev) => ({
+      ...prev,
+      fichas: releaseCharacterSheetLock(prev.fichas, sheetId),
+    }));
+  };
+
   const handleCreateCharacterFromHub = (newSheet: CharacterSheet, spawnToken: boolean) => {
+    const sheetWithClaim: CharacterSheet =
+      userRole === 'jogador'
+        ? {
+            ...newSheet,
+            ocupadoPorSessionId: sessionId,
+            ocupadoPorNome: userName,
+          }
+        : newSheet;
+
     const newToken: MapToken | null =
       spawnToken && userRole === 'mestre'
         ? {
             id: `tok-${Date.now()}`,
-            nome: newSheet.nomePersonagem,
+            nome: sheetWithClaim.nomePersonagem,
             categoria: 'character',
             fichaId: newSheet.id,
             x: 8,
@@ -616,22 +779,33 @@ export default function App() {
       fichaPersonagemId: newSheet.id,
     };
 
-    commitCampaignState((prev) => ({
-      ...prev,
-      fichas: [newSheet, ...prev.fichas],
-      assets: [newAsset, ...prev.assets],
-      nomesCampanha: syncCampaignCharacterNames(
-        [...prev.nomesCampanha, newSheet.nomePersonagem],
-        [newSheet, ...prev.fichas]
-      ),
-      cenas: newToken
-        ? prev.cenas.map((c) =>
-            c.id === prev.cenaAtivaId ? { ...c, tokens: [...c.tokens, newToken] } : c
-          )
-        : prev.cenas,
-    }));
+    commitCampaignState((prev) => {
+      const baseFichas =
+        userRole === 'jogador'
+          ? prev.fichas.map((f) =>
+              f.ocupadoPorSessionId === sessionId
+                ? { ...f, ocupadoPorSessionId: null, ocupadoPorNome: null }
+                : f
+            )
+          : prev.fichas;
+      return {
+        ...prev,
+        fichas: [sheetWithClaim, ...baseFichas],
+        assets: [newAsset, ...prev.assets],
+        nomesCampanha: syncCampaignCharacterNames(
+          [...prev.nomesCampanha, sheetWithClaim.nomePersonagem],
+          [sheetWithClaim, ...baseFichas]
+        ),
+        cenas: newToken
+          ? prev.cenas.map((c) =>
+              c.id === prev.cenaAtivaId ? { ...c, tokens: [...c.tokens, newToken] } : c
+            )
+          : prev.cenas,
+      };
+    });
 
-    setActivePlayingSheetId(newSheet.id);
+    setSheetClaimError('');
+    setActivePlayingSheetId(sheetWithClaim.id);
     if (newToken) setSelectedTokenId(newToken.id);
   };
 
@@ -990,7 +1164,61 @@ export default function App() {
           setSelectedTokenId(newLight.id);
           setActiveMapTool('hand');
         }}
-        onOpenSheet={(sheetId) => setActiveSheetModalId(sheetId)}
+        onAddWallSegment={(newSegment) => {
+          if (userRole !== 'mestre') return;
+          setWallUndoStack((prev) => [
+            ...prev.slice(-19),
+            { sceneId: activeScene.id, previousWalls: [...(activeScene.paredes || [])] },
+          ]);
+          commitCampaignState((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === activeScene.id
+                ? {
+                    ...c,
+                    colisaoParedesAtiva: true,
+                    paredes: insertWallOrDoorSegment(c.paredes, newSegment),
+                  }
+                : c
+            ),
+          }));
+        }}
+        onToggleDoorSegment={(segmentId) => {
+          commitCampaignState((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === activeScene.id
+                ? {
+                    ...c,
+                    paredes: (c.paredes || []).map((seg) =>
+                      seg.id === segmentId && seg.tipo === 'porta'
+                        ? { ...seg, aberta: !seg.aberta }
+                        : seg
+                    ),
+                  }
+                : c
+            ),
+          }));
+        }}
+        onDeleteWallSegment={(segmentId) => {
+          if (userRole !== 'mestre') return;
+          setWallUndoStack((prev) => [
+            ...prev.slice(-19),
+            { sceneId: activeScene.id, previousWalls: [...(activeScene.paredes || [])] },
+          ]);
+          commitCampaignState((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === activeScene.id
+                ? {
+                    ...c,
+                    paredes: (c.paredes || []).filter((seg) => seg.id !== segmentId),
+                  }
+                : c
+            ),
+          }));
+        }}
+        onOpenSheet={(sheetId) => handleOpenSheetGuarded(sheetId)}
         onAddDrawing={(drawing) => {
           commitCampaignState((prev) => ({
             ...prev,
@@ -1024,19 +1252,22 @@ export default function App() {
             <LayoutGrid className="w-4 h-4" />
           </button>
 
-          <button
-            type="button"
-            onClick={() => handleChangeUserRole(userRole === 'mestre' ? 'jogador' : 'mestre')}
-            title="Alternar rapidamente entre Mestre (GM) e Jogador"
-            className={`px-2 py-1 rounded-xl text-[11px] font-bold uppercase transition-colors cursor-pointer flex items-center gap-1 ${
+          <div
+            data-testid="hud-fixed-role-badge"
+            title={
               userRole === 'mestre'
-                ? 'bg-violet-600/30 text-violet-200 border border-violet-500/50 hover:bg-violet-600/50'
-                : 'bg-emerald-600/30 text-emerald-200 border border-emerald-500/50 hover:bg-emerald-600/50'
+                ? 'Você é o Mestre (Criador da Sala)'
+                : 'Você entrou na sala como Jogador'
+            }
+            className={`px-2 py-1 rounded-xl text-[11px] font-bold uppercase flex items-center gap-1 select-none ${
+              userRole === 'mestre'
+                ? 'bg-violet-600/30 text-violet-200 border border-violet-500/50'
+                : 'bg-emerald-600/30 text-emerald-200 border border-emerald-500/50'
             }`}
           >
             <User className="w-3.5 h-3.5" />
             <span>{userRole === 'mestre' ? 'Mestre' : 'Jogador'}</span>
-          </button>
+          </div>
 
           {userRole === 'mestre' && (
             <button
@@ -1090,7 +1321,7 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setActiveSheetModalId(activePlayingSheetId)}
+            onClick={() => handleOpenSheetGuarded(activePlayingSheetId)}
             aria-label="Abrir Ficha D&D 5e"
             title="Abrir Ficha D&D 5e Completa"
             className="p-1.5 rounded-xl text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors cursor-pointer"
@@ -1143,7 +1374,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Owlbear "Players" Card + Free Role Switcher + Exclusive Player Fog Selector */}
+        {/* Owlbear "Players" Card + Room Code + Fixed Role Badge + Character Access */}
         <div
           className={`w-64 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl p-3.5 shadow-2xl pointer-events-auto ${
             sidebarOpen ? 'hidden md:block' : 'block'
@@ -1167,6 +1398,47 @@ export default function App() {
             </button>
           </div>
 
+          {/* Prominent Unique Room Code + Copy Button */}
+          <div
+            data-testid="tabletop-room-code-badge"
+            className="mb-2 px-2.5 py-1.5 rounded-xl bg-[#181922] border border-violet-500/40 flex items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              <KeyRound className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+              <div className="min-w-0">
+                <span className="block text-[9px] uppercase tracking-wider text-zinc-400 font-semibold leading-none">
+                  Código da Sala
+                </span>
+                <span className="text-xs font-mono font-extrabold text-violet-300 tracking-wider">
+                  {campaign.codigoSala}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              data-testid="tabletop-copy-room-code-btn"
+              onClick={() => {
+                navigator.clipboard?.writeText(campaign.codigoSala).catch(() => {});
+                setCopiedTabletopCode(true);
+                window.setTimeout(() => setCopiedTabletopCode(false), 1800);
+              }}
+              className="px-2 py-1 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white border border-violet-500/40 text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+              title="Copiar código único desta sala para convidar jogadores"
+            >
+              {copiedTabletopCode ? (
+                <>
+                  <Check className="w-3 h-3 text-emerald-300" />
+                  <span>Copiado!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3" />
+                  <span>Copiar</span>
+                </>
+              )}
+            </button>
+          </div>
+
           <div className="flex items-center justify-between py-1 gap-2">
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <span className="w-3 h-3 rounded-full bg-[#4ade80] shrink-0" />
@@ -1181,107 +1453,84 @@ export default function App() {
               />
             </div>
 
-            <button
-              type="button"
-              onClick={() =>
-                handleChangeUserRole(userRole === 'mestre' ? 'jogador' : 'mestre')
+            <span
+              data-testid="players-card-role-badge"
+              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 select-none ${
+                userRole === 'mestre'
+                  ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40'
+                  : 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40'
+              }`}
+              title={
+                userRole === 'mestre'
+                  ? 'Mestre (Criador da Sala)'
+                  : 'Jogador conectado à sala'
               }
-              data-testid="toggle-role-btn"
-              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase cursor-pointer transition-colors shrink-0 ${
-                userRole === 'mestre'
-                  ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40 hover:bg-violet-600/50'
-                  : 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/50'
-              }`}
-              title="Clique para alternar livremente entre Mestre e Jogador"
             >
-              {userRole === 'mestre' ? 'Mestre (Trocar)' : 'Jogador (Trocar)'}
-            </button>
-          </div>
-
-          <div className="mt-1.5 grid grid-cols-2 gap-1 bg-[#181922] p-1 rounded-xl border border-zinc-800">
-            <button
-              type="button"
-              onClick={() => handleChangeUserRole('mestre')}
-              className={`py-1 rounded-lg text-[10px] font-bold uppercase transition-colors cursor-pointer ${
-                userRole === 'mestre'
-                  ? 'bg-violet-600 text-white shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              👑 Mestre
-            </button>
-            <button
-              type="button"
-              onClick={() => handleChangeUserRole('jogador')}
-              className={`py-1 rounded-lg text-[10px] font-bold uppercase transition-colors cursor-pointer ${
-                userRole === 'jogador'
-                  ? 'bg-emerald-600 text-white shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              🛡️ Jogador
-            </button>
-          </div>
-
-          {/* Per-Player Exclusive Fog of War Vision Indicator & Character Selector */}
-          <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-1">
-            <div className="flex items-center justify-between text-[10px] text-zinc-400">
-              <span className="font-semibold uppercase tracking-wider">
-                {userRole === 'mestre' ? 'Visão: Mestre (Vê Tudo)' : 'Visão Exclusiva do Token:'}
-              </span>
-            </div>
-            <select
-              aria-label="Selecionar Meu Personagem para Visão na Névoa"
-              data-testid="player-fog-sheet-select"
-              value={activePlayingSheetId}
-              onChange={(e) => {
-                const nextId = e.target.value;
-                setActivePlayingSheetId(nextId);
-                const ownTok = activeScene.tokens.find((t) => t.fichaId === nextId);
-                if (ownTok) {
-                  setSelectedTokenId(ownTok.id);
-                }
-              }}
-              className="w-full bg-[#181922] border border-zinc-700/80 rounded-lg px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-violet-500"
-            >
-              {campaign.fichas
-                .filter((f) => !f.ehMestreOculto || userRole === 'mestre')
-                .map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.nomePersonagem} ({f.classeNivel})
-                  </option>
-                ))}
-            </select>
+              {userRole === 'mestre' ? '👑 Mestre' : '🛡️ Jogador'}
+            </span>
           </div>
 
           <div className="mt-2.5 pt-2.5 border-t border-zinc-800 space-y-1.5">
-            <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-              <span>Personagens na Campanha</span>
-              <span>{campaign.nomesCampanha.length}</span>
-            </div>
-            <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
-              {campaign.nomesCampanha.map((nome) => {
-                const ficha = campaign.fichas.find(
-                  (f) => f.nomePersonagem.toLowerCase() === nome.toLowerCase()
-                );
-                return (
-                  <div
-                    key={nome}
-                    onClick={() => {
-                      if (ficha) setActiveSheetModalId(ficha.id);
-                    }}
-                    className="flex items-center justify-between px-2 py-1 rounded-lg bg-[#181922] hover:bg-zinc-800 text-xs cursor-pointer transition-colors"
-                  >
-                    <span className="truncate font-medium text-zinc-200">{nome}</span>
-                    {ficha && (
-                      <span className="text-[10px] font-mono text-violet-400 shrink-0 ml-1">
-                        Ficha 5e
+            {userRole === 'mestre' ? (
+              <>
+                <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                  <span>Personagens na Campanha</span>
+                  <span>{campaign.nomesCampanha.length}</span>
+                </div>
+                <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                  {campaign.nomesCampanha.map((nome) => {
+                    const ficha = campaign.fichas.find(
+                      (f) => f.nomePersonagem.toLowerCase() === nome.toLowerCase()
+                    );
+                    return (
+                      <div
+                        key={nome}
+                        onClick={() => {
+                          if (ficha) handleOpenSheetGuarded(ficha.id);
+                        }}
+                        className="flex items-center justify-between px-2 py-1 rounded-lg bg-[#181922] hover:bg-zinc-800 text-xs cursor-pointer transition-colors"
+                      >
+                        <span className="truncate font-medium text-zinc-200">{nome}</span>
+                        {ficha && (
+                          <span className="text-[10px] font-mono text-violet-400 shrink-0 ml-1">
+                            Ficha 5e
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                  <span>Sua Ficha Selecionada</span>
+                  <span>1/1</span>
+                </div>
+                <div className="space-y-1">
+                  {getVisibleSheetsForTabletopPlayer(
+                    campaign.fichas,
+                    userRole,
+                    activePlayingSheetId,
+                    sessionId
+                  ).map((ficha) => (
+                    <div
+                      key={ficha.id}
+                      data-testid={`player-own-sheet-row-${ficha.id}`}
+                      onClick={() => handleOpenSheetGuarded(ficha.id)}
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#181922] hover:bg-zinc-800 border border-emerald-500/30 text-xs cursor-pointer transition-colors"
+                    >
+                      <span className="truncate font-semibold text-zinc-100">
+                        {ficha.nomePersonagem}
                       </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                      <span className="text-[10px] font-mono text-emerald-400 shrink-0 ml-1">
+                        Abrir Ficha 5e
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1387,6 +1636,79 @@ export default function App() {
             <Flame className="w-4 h-4" />
             <span className="text-[9px] font-bold uppercase leading-none">Luz</span>
           </button>
+
+          {userRole === 'mestre' && (
+            <>
+              <button
+                type="button"
+                data-testid="tool-toggle-wall-collision-btn"
+                onClick={() => {
+                  commitCampaignState((prev) => ({
+                    ...prev,
+                    cenas: prev.cenas.map((c) => {
+                      if (c.id !== activeScene.id) return c;
+                      const nextActive = !c.colisaoParedesAtiva;
+                      return {
+                        ...c,
+                        colisaoParedesAtiva: nextActive,
+                        paredes: c.paredes || [],
+                      };
+                    }),
+                  }));
+                }}
+                aria-label="Ativar ou Desativar Colisão de Paredes e Luz Raycasting"
+                title={`Colisão de Paredes & Sombra de Luz (${
+                  activeScene.colisaoParedesAtiva ? 'Ativada' : 'Desativada'
+                }) — Clique para alternar a qualquer momento`}
+                className={`px-2 py-1.5 rounded-xl transition-colors cursor-pointer flex flex-col items-center gap-0.5 ${
+                  activeScene.colisaoParedesAtiva
+                    ? 'bg-amber-500/25 text-amber-300 border border-amber-500/60 font-bold'
+                    : 'text-zinc-400 hover:bg-zinc-700/60 hover:text-white'
+                }`}
+              >
+                <BrickWall className="w-4 h-4" />
+                <span className="text-[8px] font-bold uppercase leading-none">
+                  {activeScene.colisaoParedesAtiva ? 'Colisão' : 'Sem Col.'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="tool-draw-wall-btn"
+                onClick={() =>
+                  setActiveMapTool(activeMapTool === 'wall' ? 'hand' : 'wall')
+                }
+                aria-label="Desenhar Parede no Mapa"
+                title="Desenhar Parede (Bloqueia passagem de tokens e luz) — Arraste no mapa para criar parede"
+                className={`px-2 py-1.5 rounded-xl transition-colors cursor-pointer flex flex-col items-center gap-0.5 ${
+                  activeMapTool === 'wall'
+                    ? 'bg-sky-500 text-zinc-950 font-bold shadow-lg ring-2 ring-sky-300'
+                    : 'text-sky-400 hover:bg-zinc-700/60'
+                }`}
+              >
+                <BrickWall className="w-4 h-4" />
+                <span className="text-[8px] font-bold uppercase leading-none">Parede</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="tool-add-door-btn"
+                onClick={() =>
+                  setActiveMapTool(activeMapTool === 'door' ? 'hand' : 'door')
+                }
+                aria-label="Adicionar Porta no Mapa"
+                title="Adicionar Porta (Abrir/Fechar no mapa: aberta passa luz e token, fechada bloqueia tudo) — Arraste no mapa para criar porta"
+                className={`px-2 py-1.5 rounded-xl transition-colors cursor-pointer flex flex-col items-center gap-0.5 ${
+                  activeMapTool === 'door'
+                    ? 'bg-emerald-500 text-zinc-950 font-bold shadow-lg ring-2 ring-emerald-300'
+                    : 'text-emerald-400 hover:bg-zinc-700/60'
+                }`}
+              >
+                <DoorOpen className="w-4 h-4" />
+                <span className="text-[8px] font-bold uppercase leading-none">Porta</span>
+              </button>
+            </>
+          )}
 
           <button
             type="button"
@@ -1516,6 +1838,8 @@ export default function App() {
               snappingAtivo: extraConfig?.snappingAtivo ?? true,
               nevoaAtiva: extraConfig?.nevoaAtiva ?? true,
               iluminacaoDinamicaAtiva: true,
+              colisaoParedesAtiva: extraConfig?.colisaoParedesAtiva ?? true,
+              paredes: extraConfig?.paredes || [],
               nevoaAreasManuais: [],
               tokens: [],
               desenhos: [],
@@ -1677,7 +2001,7 @@ export default function App() {
             }));
             setSelectedTokenId(newTok.id);
           }}
-          onOpenSheetById={(sheetId) => setActiveSheetModalId(sheetId)}
+          onOpenSheetById={(sheetId) => handleOpenSheetGuarded(sheetId)}
         />
       )}
 
@@ -1692,8 +2016,8 @@ export default function App() {
           damageHistory={damageHistory}
           sheets={campaign.fichas}
           activeSheetId={activePlayingSheetId}
-          onSelectActiveSheet={setActivePlayingSheetId}
-          onOpenFullSheet={(sheetId) => setActiveSheetModalId(sheetId)}
+          onSelectActiveSheet={handleSelectAndClaimSheet}
+          onOpenFullSheet={(sheetId) => handleOpenSheetGuarded(sheetId)}
           onRenameSheet={handleRenameCharacterSheet}
           onDeleteSheet={handleDeleteCharacter}
           userRole={userRole}
@@ -1794,25 +2118,43 @@ export default function App() {
       )}
 
       {/* INITIAL CAMPAIGN HUB & QUICK CHARACTER CREATOR MODAL */}
-      {showCampaignHub && (
+      {showCampaignHub && !showRoomsScreen && (
         <CampaignHubModal
           campaign={campaign}
           activeSheetId={activePlayingSheetId}
+          sessionId={sessionId}
           userRole={userRole}
           userName={userName}
-          isGmSlotTakenByAnother={isGmSlotTakenByAnother}
-          currentGmName={campaign.mestreNome}
-          onChangeRole={handleChangeUserRole}
+          sheetClaimError={sheetClaimError}
           onChangeUserName={setUserName}
           onUpdateCampaignMeta={(nomeCampanha, capaCampanhaUrl) => {
+            const nextCover = capaCampanhaUrl ?? campaign.capaCampanhaUrl;
             commitCampaignState((prev) => ({
               ...prev,
               nomeCampanha,
-              capaCampanhaUrl: capaCampanhaUrl ?? prev.capaCampanhaUrl,
+              capaCampanhaUrl: nextCover,
             }));
+            setOwlbearRooms((prevRooms) => {
+              const updated = prevRooms.map((r) =>
+                r.codigo === campaign.codigoSala
+                  ? {
+                      ...r,
+                      nome: nomeCampanha,
+                      imagemMesaUrl: nextCover || r.imagemMesaUrl,
+                    }
+                  : r
+              );
+              saveOwlbearRooms(updated);
+              return updated;
+            });
           }}
-          onSelectSheet={(sheetId) => setActivePlayingSheetId(sheetId)}
+          onSelectSheet={handleSelectAndClaimSheet}
+          onReleaseSheetLock={handleReleaseSheetLock}
           onOpenFullSheet={(sheetId) => {
+            const targetSheet = campaign.fichas.find((f) => f.id === sheetId);
+            if (!canUserOpenCharacterSheet(targetSheet, userRole, activePlayingSheetId, sessionId)) {
+              return;
+            }
             setShowCampaignHub(false);
             setActiveSheetModalId(sheetId);
           }}
@@ -1831,8 +2173,66 @@ export default function App() {
             }));
           }}
           onEnterTabletop={() => setShowCampaignHub(false)}
+          onBackToRooms={() => {
+            setShowCampaignHub(false);
+            setShowRoomsScreen(true);
+          }}
           onImportCampaignJson={(importedState) => {
             commitCampaignState(() => importedState);
+          }}
+        />
+      )}
+
+      {/* TELA INICIAL DE SALAS (ESTILO OWLBEAR RODEO) */}
+      {showRoomsScreen && (
+        <OwlbearRoomsScreen
+          rooms={owlbearRooms}
+          maxGmRooms={2}
+          onUpdateRooms={(nextRooms) => {
+            setOwlbearRooms(nextRooms);
+            saveOwlbearRooms(nextRooms);
+          }}
+          onOpenRoomHub={(room) => {
+            const enforcedRole = resolveRoomRoleForEntry(room);
+            handleChangeUserRole(enforcedRole);
+            setSheetClaimError('');
+            commitCampaignState((prev) => {
+              let nextFichas = prev.fichas;
+              if (enforcedRole === 'jogador') {
+                const alreadyOwned = prev.fichas.find(
+                  (f) => f.ocupadoPorSessionId === sessionId
+                );
+                const targetSheet =
+                  alreadyOwned ||
+                  prev.fichas.find(
+                    (f) =>
+                      !f.ehMestreOculto &&
+                      (!f.ocupadoPorSessionId || f.ocupadoPorSessionId === sessionId)
+                  );
+                if (targetSheet) {
+                  setActivePlayingSheetId(targetSheet.id);
+                  const claimRes = claimCharacterSheetForPlayer(
+                    prev.fichas,
+                    targetSheet.id,
+                    sessionId,
+                    userName,
+                    'jogador'
+                  );
+                  if (claimRes.claimed) {
+                    nextFichas = claimRes.updatedSheets;
+                  }
+                }
+              }
+              return {
+                ...prev,
+                fichas: nextFichas,
+                nomeCampanha: room.nome,
+                codigoSala: room.codigo,
+                capaCampanhaUrl: room.imagemMesaUrl || prev.capaCampanhaUrl,
+              };
+            });
+            setShowRoomsScreen(false);
+            setShowCampaignHub(true);
           }}
         />
       )}

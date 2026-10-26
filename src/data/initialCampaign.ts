@@ -561,6 +561,36 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
       escalaUnidade: '5ft',
       nevoaAtiva: true,
       iluminacaoDinamicaAtiva: true,
+      colisaoParedesAtiva: true,
+      paredes: [
+        // Câmara Noroeste (Fechada por paredes + porta interativa)
+        { id: 'wall-nw-top', x1: 3, y1: 2, x2: 9, y2: 2, tipo: 'parede' },
+        { id: 'wall-nw-left', x1: 3, y1: 2, x2: 3, y2: 6, tipo: 'parede' },
+        { id: 'wall-nw-v', x1: 9, y1: 2, x2: 9, y2: 6, tipo: 'parede' },
+        { id: 'wall-nw-h', x1: 3, y1: 6, x2: 7, y2: 6, tipo: 'parede' },
+        { id: 'door-nw', x1: 7, y1: 6, x2: 9, y2: 6, tipo: 'porta', aberta: true },
+
+        // Câmara Nordeste (Sala Fechada do Chefe Goblin — Porta Fechada)
+        { id: 'wall-ne-top', x1: 16, y1: 2, x2: 23, y2: 2, tipo: 'parede' },
+        { id: 'wall-ne-right', x1: 23, y1: 2, x2: 23, y2: 6, tipo: 'parede' },
+        { id: 'wall-ne-v', x1: 16, y1: 2, x2: 16, y2: 4, tipo: 'parede' },
+        { id: 'door-ne', x1: 16, y1: 4, x2: 16, y2: 6, tipo: 'porta', aberta: false },
+        { id: 'wall-ne-h', x1: 16, y1: 6, x2: 23, y2: 6, tipo: 'parede' },
+
+        // Câmara Sudoeste (Fechada por paredes + porta interativa)
+        { id: 'wall-sw-left', x1: 3, y1: 10, x2: 3, y2: 14, tipo: 'parede' },
+        { id: 'wall-sw-bot', x1: 3, y1: 14, x2: 9, y2: 14, tipo: 'parede' },
+        { id: 'wall-sw-h', x1: 3, y1: 10, x2: 9, y2: 10, tipo: 'parede' },
+        { id: 'door-sw', x1: 9, y1: 10, x2: 9, y2: 12, tipo: 'porta', aberta: true },
+        { id: 'wall-sw-v', x1: 9, y1: 12, x2: 9, y2: 14, tipo: 'parede' },
+
+        // Câmara Sudeste (Sala Fechada — Porta Fechada)
+        { id: 'wall-se-right', x1: 23, y1: 10, x2: 23, y2: 14, tipo: 'parede' },
+        { id: 'wall-se-bot', x1: 16, y1: 14, x2: 23, y2: 14, tipo: 'parede' },
+        { id: 'door-se', x1: 16, y1: 10, x2: 18, y2: 10, tipo: 'porta', aberta: false },
+        { id: 'wall-se-h', x1: 18, y1: 10, x2: 23, y2: 10, tipo: 'parede' },
+        { id: 'wall-se-v', x1: 16, y1: 10, x2: 16, y2: 14, tipo: 'parede' },
+      ],
       nevoaAreasManuais: [],
       tokens: [
         {
@@ -568,8 +598,8 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           nome: 'Elara Sombralua',
           categoria: 'character',
           fichaId: 'char-elara',
-          x: 7,
-          y: 6,
+          x: 11,
+          y: 7,
           larguraQuadrados: 1,
           alturaQuadrados: 1,
           rotacao: 0,
@@ -578,8 +608,8 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           pvAtual: 26,
           pvMaximo: 26,
           ca: 15,
-          visaoQuadrados: 4, // 20ft vision
-          luzQuadrados: 4,   // 20ft Arcane Staff light
+          visaoQuadrados: 5, // 25ft vision
+          luzQuadrados: 4.5, // Arcane Staff light
           luzCor: '#a78bfa',
           ocultoParaJogadores: false,
           bloqueado: false,
@@ -591,7 +621,7 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           categoria: 'character',
           fichaId: 'char-thorin',
           x: 13,
-          y: 10,
+          y: 8,
           larguraQuadrados: 1,
           alturaQuadrados: 1,
           rotacao: 0,
@@ -612,8 +642,8 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           nome: 'Krag, Chefe Goblin',
           categoria: 'character',
           fichaId: 'char-goblin-chefe',
-          x: 14,
-          y: 5,
+          x: 18,
+          y: 4,
           larguraQuadrados: 1,
           alturaQuadrados: 1,
           rotacao: 0,
@@ -622,7 +652,7 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           pvAtual: 32,
           pvMaximo: 32,
           ca: 16,
-          visaoQuadrados: 4,
+          visaoQuadrados: 0,
           luzQuadrados: 0,
           luzCor: '#ef4444',
           ocultoParaJogadores: false,
@@ -633,7 +663,7 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
           id: 'tok-prop-torch',
           nome: 'Braseiro Ancestral',
           categoria: 'prop',
-          x: 11,
+          x: 12,
           y: 5,
           larguraQuadrados: 1,
           alturaQuadrados: 1,

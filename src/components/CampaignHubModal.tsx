@@ -16,6 +16,11 @@ import {
   Swords,
   CheckCircle2,
   Image as ImageIcon,
+  ArrowLeft,
+  Copy,
+  KeyRound,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import type { CampaignState, CharacterSheet } from '../types/vtt.ts';
 import {
@@ -25,6 +30,11 @@ import {
   syncCampaignCharacterNames,
 } from '../utils/dndRules.ts';
 import {
+  canUserOpenCharacterSheet,
+  canUserSelectCharacterSheet,
+  isSheetOccupiedByAnotherPlayer,
+} from '../utils/roomAccessEngine.ts';
+import {
   SVG_CAMPAIGN_COVER,
   SVG_TOKEN_ELARA,
   SVG_TOKEN_THORIN,
@@ -33,21 +43,22 @@ import {
 
 interface CampaignHubModalProps {
   campaign: CampaignState;
+  sessionId: string;
   activeSheetId: string;
   userRole: 'mestre' | 'jogador';
   userName: string;
-  isGmSlotTakenByAnother: boolean;
-  currentGmName?: string | null;
-  onChangeRole: (role: 'mestre' | 'jogador') => void;
+  sheetClaimError?: string;
   onChangeUserName: (name: string) => void;
   onUpdateCampaignMeta: (nomeCampanha: string, capaCampanhaUrl?: string) => void;
   onSelectSheet: (sheetId: string) => void;
+  onReleaseSheetLock?: (sheetId: string) => void;
   onOpenFullSheet: (sheetId: string) => void;
   onCreateCharacter: (newSheet: CharacterSheet, addTokenToMap: boolean) => void;
   onDeleteCharacter: (sheetId: string) => void;
   onAddCampaignNameOnly: (name: string) => void;
   onRemoveCampaignName: (name: string) => void;
   onEnterTabletop: () => void;
+  onBackToRooms?: () => void;
   onImportCampaignJson: (state: CampaignState) => void;
 }
 
@@ -59,21 +70,22 @@ const PRESET_AVATARS = [
 
 export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
   campaign,
+  sessionId,
   activeSheetId,
   userRole,
   userName,
-  isGmSlotTakenByAnother,
-  currentGmName,
-  onChangeRole,
+  sheetClaimError,
   onChangeUserName,
   onUpdateCampaignMeta,
   onSelectSheet,
+  onReleaseSheetLock,
   onOpenFullSheet,
   onCreateCharacter,
   onDeleteCharacter,
   onAddCampaignNameOnly,
   onRemoveCampaignName,
   onEnterTabletop,
+  onBackToRooms,
   onImportCampaignJson,
 }) => {
   const [nomePersonagem, setNomePersonagem] = useState('');
@@ -93,6 +105,17 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
   const [addTokenToMap, setAddTokenToMap] = useState(true);
   const [formError, setFormError] = useState('');
   const [novoNomeCampanhaRapido, setNovoNomeCampanhaRapido] = useState('');
+  const [copiedRoomCode, setCopiedRoomCode] = useState(false);
+
+  const handleCopyHubRoomCode = () => {
+    try {
+      navigator.clipboard?.writeText(campaign.codigoSala);
+    } catch {
+      // ignore clipboard errors
+    }
+    setCopiedRoomCode(true);
+    window.setTimeout(() => setCopiedRoomCode(false), 1800);
+  };
 
   // Lossless image upload for Campaign Cover Banner
   const handleCampaignCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -294,6 +317,22 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
           />
           <div className="absolute inset-0 bg-gradient-to-t from-[#14151c] via-[#14151c]/65 to-transparent" />
 
+          {/* Top-Left Back to Rooms Button */}
+          {onBackToRooms && (
+            <div className="absolute top-4 left-5 flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="back-to-rooms-btn"
+                onClick={onBackToRooms}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black/75 hover:bg-violet-600 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer shadow-lg"
+                title="Voltar para a tela inicial de Salas (Mestre / Jogador)"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-violet-300" />
+                <span>Voltar às salas</span>
+              </button>
+            </div>
+          )}
+
           {/* Top-Right Cover Photo Upload Button */}
           <div className="absolute top-4 right-5 flex items-center gap-2">
             {userRole === 'mestre' && (
@@ -310,28 +349,45 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
             )}
           </div>
 
-          {/* Bottom Overlay inside Cover: Editable Campaign Name + Controls */}
+          {/* Bottom Overlay inside Cover: Prominent Room Code + Editable Campaign Name + Controls */}
           <div className="absolute bottom-0 inset-x-0 px-6 py-4 flex flex-col gap-2.5">
             <div>
-              <span className="text-xs font-mono uppercase tracking-widest text-violet-300">
-                SALA SINCRONIZADA · {campaign.codigoSala}
-              </span>
+              <div className="flex flex-wrap items-center gap-2 mb-1">
+                <div
+                  data-testid="hub-room-code-badge"
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#14151b]/95 border border-violet-500/60 text-xs font-mono font-bold text-violet-200 shadow-lg"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-violet-400" />
+                  <span>CÓDIGO DA SALA: {campaign.codigoSala}</span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="hub-copy-room-code-btn"
+                  onClick={handleCopyHubRoomCode}
+                  title="Copiar código exclusivo desta sala para enviar aos jogadores"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-bold text-white shadow transition-colors cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{copiedRoomCode ? '✓ Código Copiado!' : 'Copiar Código'}</span>
+                </button>
+              </div>
               <div className="mt-0.5 flex items-center gap-2">
                 <input
                   type="text"
                   aria-label="Nome da Campanha"
+                  readOnly={userRole !== 'mestre'}
                   value={campaign.nomeCampanha}
                   onChange={(e) => onUpdateCampaignMeta(e.target.value, campaign.capaCampanhaUrl)}
                   placeholder="Digite o nome da campanha..."
                   className="w-full text-xl md:text-2xl font-bold tracking-tight text-white bg-transparent border-b border-transparent hover:border-zinc-500 focus:border-violet-400 focus:outline-none"
                   style={{ fontFamily: 'Cinzel, serif' }}
                 />
-                <Edit3 className="w-4 h-4 text-zinc-400 shrink-0" />
+                {userRole === 'mestre' && <Edit3 className="w-4 h-4 text-zinc-400 shrink-0" />}
               </div>
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2.5">
-              {/* Player Name & Role Switch */}
+              {/* Player Name & Fixed Room Role Badge (Creator = Mestre, Joined via Code = Jogador) */}
               <div className="flex items-center gap-2 bg-[#14151b]/95 border border-zinc-700/80 rounded-xl px-3 py-1.5">
                 <label htmlFor="hub-user-name" className="text-xs text-zinc-400">
                   Seu Nome:
@@ -343,49 +399,37 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
                   onChange={(e) => onChangeUserName(e.target.value)}
                   className="bg-transparent text-xs font-medium text-white focus:outline-none w-28 border-b border-zinc-700 focus:border-violet-400"
                 />
-                <div className="flex items-center gap-1 ml-2 bg-[#20222b] p-0.5 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => onChangeRole('mestre')}
-                    title="Alternar para o modo Mestre (GM)"
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                      userRole === 'mestre'
-                        ? 'bg-violet-600 text-white'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    👑 Mestre (GM)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onChangeRole('jogador')}
-                    title="Alternar para o modo Jogador"
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                      userRole === 'jogador'
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    🛡️ Jogador
-                  </button>
-                </div>
+                <span
+                  data-testid="hub-fixed-role-badge"
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg whitespace-nowrap ml-1 ${
+                    userRole === 'mestre'
+                      ? 'bg-violet-600/30 border border-violet-500/60 text-violet-200'
+                      : 'bg-emerald-600/30 border border-emerald-500/60 text-emerald-200'
+                  }`}
+                >
+                  {userRole === 'mestre' ? '👑 Mestre (Criador da Sala)' : '🛡️ Jogador'}
+                </span>
               </div>
 
-              <button
-                type="button"
-                onClick={handleExportJson}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14151b]/95 hover:bg-zinc-800 border border-zinc-700 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
-                title="Exportar backup JSON para salvar ou hospedar no GitHub"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Exportar JSON
-              </button>
+              {userRole === 'mestre' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleExportJson}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14151b]/95 hover:bg-zinc-800 border border-zinc-700 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
+                    title="Exportar backup JSON para salvar ou hospedar no GitHub"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Exportar JSON
+                  </button>
 
-              <label className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14151b]/95 hover:bg-zinc-800 border border-zinc-700 rounded-xl transition-colors cursor-pointer whitespace-nowrap">
-                <Upload className="w-3.5 h-3.5" />
-                Importar JSON
-                <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
-              </label>
+                  <label className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14151b]/95 hover:bg-zinc-800 border border-zinc-700 rounded-xl transition-colors cursor-pointer whitespace-nowrap">
+                    <Upload className="w-3.5 h-3.5" />
+                    Importar JSON
+                    <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+                  </label>
+                </>
+              )}
 
               <button
                 type="button"
@@ -586,103 +630,210 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
             </div>
           </div>
 
-          {/* Center Column (5 cols): Saved Character Sheets List */}
+          {/* Center Column (5 cols): Saved Character Sheets List (1 Player per Sheet & Exclusive Vision/Sheet Selection) */}
           <div className="lg:col-span-5 bg-[#14151b] border border-zinc-800/90 rounded-xl p-5 flex flex-col">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-2">
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <BookOpen className="w-4 h-4 text-violet-400" />
-                Fichas de Personagens Salvas ({campaign.fichas.length})
+                Fichas de Personagens Salvas (
+                {
+                  campaign.fichas.filter(
+                    (f) => !f.ehMestreOculto || userRole === 'mestre'
+                  ).length
+                }
+                )
               </h2>
-              <span className="text-xs text-zinc-400">Acesso Mestre & Jogadores</span>
+              <span className="text-xs text-violet-300 font-medium">
+                1 Jogador por Ficha · Define seu Token
+              </span>
             </div>
 
+            <p className="text-xs text-zinc-400 mb-3">
+              {userRole === 'mestre'
+                ? 'Como Mestre, você visualiza e gerencia todas as fichas da mesa.'
+                : 'Selecione sua ficha abaixo. Ela define seu token e visão na mesa, e você verá exclusivamente a ficha selecionada.'}
+            </p>
+
+            {sheetClaimError && (
+              <div
+                role="alert"
+                className="mb-3 px-3 py-2 rounded-xl bg-rose-950/60 border border-rose-500/50 text-xs text-rose-200 font-medium"
+              >
+                {sheetClaimError}
+              </div>
+            )}
+
             <div className="space-y-3 overflow-y-auto max-h-[420px] pr-1">
-              {campaign.fichas.map((ficha) => {
-                const isSelected = ficha.id === activeSheetId;
-                const initMod = calculateInitiativeModifier(ficha);
-                return (
-                  <div
-                    key={ficha.id}
-                    className={`p-3.5 rounded-xl border transition-all ${
-                      isSelected
-                        ? 'bg-[#222430] border-violet-500/80'
-                        : 'bg-[#1b1c24] border-zinc-800 hover:border-zinc-700'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <img
-                          src={ficha.avatarUrl || SVG_TOKEN_ELARA}
-                          alt={ficha.nomePersonagem}
-                          className="w-12 h-12 rounded-full object-cover border-2 shrink-0"
-                          style={{ borderColor: ficha.corToken || '#8b5cf6' }}
-                        />
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <h3 className="text-sm font-bold text-white truncate">{ficha.nomePersonagem}</h3>
-                            {isSelected && (
-                              <span className="text-[11px] font-medium text-violet-300">· Ficha Ativa</span>
-                            )}
-                          </div>
-                          <p className="text-xs text-zinc-400 truncate">
-                            {ficha.raca} · {ficha.classeNivel} · Jogador: {ficha.nomeJogador}
-                          </p>
-                          <div className="flex items-center gap-3 mt-1.5 text-xs font-mono tabular-nums text-zinc-300">
-                            <span className="flex items-center gap-1 text-emerald-400">
-                              <Heart className="w-3.5 h-3.5" />
-                              PV {ficha.pvAtual}/{ficha.pvMaximo}
-                            </span>
-                            <span>·</span>
-                            <span className="flex items-center gap-1 text-sky-400">
-                              <Shield className="w-3.5 h-3.5" />
-                              CA {ficha.classeArmadura}
-                            </span>
-                            <span>·</span>
-                            <span className="flex items-center gap-1 text-amber-400">
-                              <Sparkles className="w-3.5 h-3.5" />
-                              Inic {formatModifier(initMod)}
-                            </span>
+              {campaign.fichas
+                .filter((f) => !f.ehMestreOculto || userRole === 'mestre')
+                .map((ficha) => {
+                  const isSelected = ficha.id === activeSheetId;
+                  const initMod = calculateInitiativeModifier(ficha);
+                  const isOccupiedByOther =
+                    userRole === 'jogador' &&
+                    isSheetOccupiedByAnotherPlayer(ficha, sessionId);
+                  const canSelect = canUserSelectCharacterSheet(
+                    ficha,
+                    userRole,
+                    sessionId
+                  );
+                  const canOpenSheet = canUserOpenCharacterSheet(
+                    ficha,
+                    userRole,
+                    activeSheetId,
+                    sessionId
+                  );
+
+                  return (
+                    <div
+                      key={ficha.id}
+                      data-testid={`saved-sheet-card-${ficha.id}`}
+                      className={`p-3.5 rounded-xl border transition-all ${
+                        isOccupiedByOther
+                          ? 'bg-[#171820]/70 border-rose-900/50 opacity-75'
+                          : isSelected
+                            ? 'bg-[#222430] border-violet-500/80'
+                            : 'bg-[#1b1c24] border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <img
+                            src={ficha.avatarUrl || SVG_TOKEN_ELARA}
+                            alt={ficha.nomePersonagem}
+                            className="w-12 h-12 rounded-full object-cover border-2 shrink-0"
+                            style={{ borderColor: ficha.corToken || '#8b5cf6' }}
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-sm font-bold text-white truncate">
+                                {ficha.nomePersonagem}
+                              </h3>
+                              {isSelected && !isOccupiedByOther && (
+                                <span className="text-[11px] font-semibold text-emerald-300">
+                                  · Seu Personagem Ativo
+                                </span>
+                              )}
+                              {ficha.ocupadoPorSessionId ? (
+                                <span
+                                  data-testid={`sheet-occupancy-badge-${ficha.id}`}
+                                  className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                                    isOccupiedByOther
+                                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                  }`}
+                                >
+                                  {isOccupiedByOther
+                                    ? `🔒 Ocupada por ${ficha.ocupadoPorNome || ficha.nomeJogador} (1/1)`
+                                    : `1/1 Jogador (${ficha.ocupadoPorNome || ficha.nomeJogador})`}
+                                </span>
+                              ) : (
+                                !ficha.ehMestreOculto && (
+                                  <span
+                                    data-testid={`sheet-occupancy-badge-${ficha.id}`}
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono"
+                                  >
+                                    Disponível (0/1)
+                                  </span>
+                                )
+                              )}
+                            </div>
+                            <p className="text-xs text-zinc-400 truncate">
+                              {ficha.raca} · {ficha.classeNivel} · Jogador: {ficha.nomeJogador}
+                            </p>
+                            <div className="flex items-center gap-3 mt-1.5 text-xs font-mono tabular-nums text-zinc-300">
+                              <span className="flex items-center gap-1 text-emerald-400">
+                                <Heart className="w-3.5 h-3.5" />
+                                PV {ficha.pvAtual}/{ficha.pvMaximo}
+                              </span>
+                              <span>·</span>
+                              <span className="flex items-center gap-1 text-sky-400">
+                                <Shield className="w-3.5 h-3.5" />
+                                CA {ficha.classeArmadura}
+                              </span>
+                              <span>·</span>
+                              <span className="flex items-center gap-1 text-amber-400">
+                                <Sparkles className="w-3.5 h-3.5" />
+                                Inic {formatModifier(initMod)}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => onSelectSheet(ficha.id)}
-                          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                            isSelected
-                              ? 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
-                          }`}
-                        >
-                          {isSelected ? 'Selecionada' : 'Usar Ficha'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onOpenFullSheet(ficha.id)}
-                          className="p-2 rounded-lg bg-violet-600/20 hover:bg-violet-600/40 text-violet-300 border border-violet-500/30 transition-colors"
-                          title="Abrir Ficha D&D 5e Completa"
-                          aria-label={`Abrir ficha completa de ${ficha.nomePersonagem}`}
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        {campaign.fichas.length > 1 && userRole === 'mestre' && (
+                        <div className="flex items-center gap-1.5 shrink-0">
                           <button
                             type="button"
-                            onClick={() => onDeleteCharacter(ficha.id)}
-                            className="p-2 rounded-lg bg-zinc-800/80 hover:bg-rose-950/60 text-zinc-400 hover:text-rose-300 transition-colors"
-                            title="Remover ficha"
-                            aria-label={`Remover ficha de ${ficha.nomePersonagem}`}
+                            data-testid={`select-sheet-btn-${ficha.id}`}
+                            disabled={!canSelect}
+                            onClick={() => {
+                              if (canSelect) onSelectSheet(ficha.id);
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${
+                              !canSelect
+                                ? 'bg-rose-950/40 text-rose-300/80 border border-rose-800/50 cursor-not-allowed'
+                                : isSelected
+                                  ? 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 cursor-pointer'
+                                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 cursor-pointer'
+                            }`}
                           >
-                            <Trash2 className="w-4 h-4" />
+                            {!canSelect ? (
+                              <>
+                                <Lock className="w-3 h-3" />
+                                <span>Ocupada</span>
+                              </>
+                            ) : isSelected ? (
+                              'Selecionada'
+                            ) : (
+                              'Usar Ficha'
+                            )}
                           </button>
-                        )}
+
+                          {/* Only show Open Full Sheet button if user is Mestre OR this is the single sheet the Player selected! */}
+                          {canOpenSheet && (
+                            <button
+                              type="button"
+                              data-testid={`open-full-sheet-btn-${ficha.id}`}
+                              onClick={() => onOpenFullSheet(ficha.id)}
+                              className="p-2 rounded-lg bg-violet-600/20 hover:bg-violet-600/40 text-violet-300 border border-violet-500/30 transition-colors cursor-pointer"
+                              title="Abrir Ficha D&D 5e Completa"
+                              aria-label={`Abrir ficha completa de ${ficha.nomePersonagem}`}
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          )}
+
+                          {/* Mestre can release a player's lock on a sheet if needed */}
+                          {userRole === 'mestre' &&
+                            ficha.ocupadoPorSessionId &&
+                            onReleaseSheetLock && (
+                              <button
+                                type="button"
+                                data-testid={`release-sheet-lock-btn-${ficha.id}`}
+                                onClick={() => onReleaseSheetLock(ficha.id)}
+                                className="p-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-colors cursor-pointer"
+                                title={`Liberar vaga da ficha (atualmente com ${ficha.ocupadoPorNome})`}
+                                aria-label={`Liberar ficha de ${ficha.nomePersonagem}`}
+                              >
+                                <Unlock className="w-4 h-4" />
+                              </button>
+                            )}
+
+                          {campaign.fichas.length > 1 && userRole === 'mestre' && (
+                            <button
+                              type="button"
+                              onClick={() => onDeleteCharacter(ficha.id)}
+                              className="p-2 rounded-lg bg-zinc-800/80 hover:bg-rose-950/60 text-zinc-400 hover:text-rose-300 transition-colors cursor-pointer"
+                              title="Remover ficha"
+                              aria-label={`Remover ficha de ${ficha.nomePersonagem}`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
             </div>
           </div>
 
@@ -703,40 +854,48 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
               </p>
 
               {/* Quick add name directly to campaign roster */}
-              <div className="flex gap-1.5 mb-3">
-                <input
-                  type="text"
-                  aria-label="Adicionar nome na lista da campanha"
-                  placeholder="Adicionar nome à lista..."
-                  value={novoNomeCampanhaRapido}
-                  onChange={(e) => setNovoNomeCampanhaRapido(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && novoNomeCampanhaRapido.trim()) {
-                      e.preventDefault();
-                      onAddCampaignNameOnly(novoNomeCampanhaRapido.trim());
-                      setNovoNomeCampanhaRapido('');
-                    }
-                  }}
-                  className="flex-1 px-2.5 py-1.5 text-xs bg-[#20222b] border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-violet-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (novoNomeCampanhaRapido.trim()) {
-                      onAddCampaignNameOnly(novoNomeCampanhaRapido.trim());
-                      setNovoNomeCampanhaRapido('');
-                    }
-                  }}
-                  className="px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg whitespace-nowrap"
-                >
-                  Incluir
-                </button>
-              </div>
+              {userRole === 'mestre' && (
+                <div className="flex gap-1.5 mb-3">
+                  <input
+                    type="text"
+                    aria-label="Adicionar nome na lista da campanha"
+                    placeholder="Adicionar nome à lista..."
+                    value={novoNomeCampanhaRapido}
+                    onChange={(e) => setNovoNomeCampanhaRapido(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && novoNomeCampanhaRapido.trim()) {
+                        e.preventDefault();
+                        onAddCampaignNameOnly(novoNomeCampanhaRapido.trim());
+                        setNovoNomeCampanhaRapido('');
+                      }
+                    }}
+                    className="flex-1 px-2.5 py-1.5 text-xs bg-[#20222b] border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-violet-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (novoNomeCampanhaRapido.trim()) {
+                        onAddCampaignNameOnly(novoNomeCampanhaRapido.trim());
+                        setNovoNomeCampanhaRapido('');
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg whitespace-nowrap"
+                  >
+                    Incluir
+                  </button>
+                </div>
+              )}
 
               <ul className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
                 {allCampaignNames.map((nome) => {
                   const linkedSheet = campaign.fichas.find(
                     (f) => f.nomePersonagem.toLowerCase() === nome.toLowerCase()
+                  );
+                  const canViewThisRosterSheet = canUserOpenCharacterSheet(
+                    linkedSheet,
+                    userRole,
+                    activeSheetId,
+                    sessionId
                   );
                   return (
                     <li
@@ -748,24 +907,24 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
                         <span className="font-medium text-zinc-100 truncate">{nome}</span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        {linkedSheet ? (
+                        {linkedSheet && canViewThisRosterSheet ? (
                           <button
                             type="button"
                             onClick={() => onOpenFullSheet(linkedSheet.id)}
-                            className="text-[11px] text-violet-400 hover:underline"
+                            className="text-[11px] text-violet-400 hover:underline cursor-pointer"
                           >
                             Ver Ficha
                           </button>
-                        ) : (
+                        ) : !linkedSheet && userRole === 'mestre' ? (
                           <button
                             type="button"
                             onClick={() => onRemoveCampaignName(nome)}
-                            className="text-[11px] text-zinc-500 hover:text-rose-400"
+                            className="text-[11px] text-zinc-500 hover:text-rose-400 cursor-pointer"
                             aria-label={`Remover ${nome} da lista`}
                           >
                             Remover
                           </button>
-                        )}
+                        ) : null}
                       </div>
                     </li>
                   );

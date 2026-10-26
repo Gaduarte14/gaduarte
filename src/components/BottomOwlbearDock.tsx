@@ -26,12 +26,14 @@ import {
   Diamond,
   CloudFog,
   EyeOff,
+  BrickWall,
 } from 'lucide-react';
 import type {
   AssetFolder,
   CharacterSheet,
   DockCategory,
   MapScene,
+  MapWallSegment,
   MediaAsset,
 } from '../types/vtt.ts';
 
@@ -156,6 +158,8 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
   const [snappingEnabled, setSnappingEnabled] = useState<boolean>(true);
   const [measurementMode, setMeasurementMode] = useState<string>('Chessboard (D&D 5e)');
   const [fogFilled, setFogFilled] = useState<boolean>(true);
+  const [wallCollisionEnabled, setWallCollisionEnabled] = useState<boolean>(true);
+  const [modalWalls, setModalWalls] = useState<MapWallSegment[]>([]);
 
   // Auto-adjust Height when Width changes if aspect ratio is locked (Owlbear behavior)
   const handleWidthSquaresChange = (newWidthRaw: number) => {
@@ -217,6 +221,8 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
     setLineType(scene.estiloLinha || 'solid');
     setSnappingEnabled(scene.snappingAtivo ?? true);
     setFogFilled(scene.nevoaAtiva ?? true);
+    setWallCollisionEnabled(Boolean(scene.colisaoParedesAtiva));
+    setModalWalls(scene.paredes ? [...scene.paredes] : []);
     setSceneModalOpen(true);
   };
 
@@ -263,6 +269,8 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
             setGridOpacity(0.25);
             setGridLineWidthPx(2);
             setFogFilled(true);
+            setWallCollisionEnabled(true);
+            setModalWalls([]);
             setSceneModalOpen(true);
           } else {
             const newAsset: MediaAsset = {
@@ -303,6 +311,8 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
       estiloLinha: lineType,
       snappingAtivo: snappingEnabled,
       nevoaAtiva: fogFilled,
+      colisaoParedesAtiva: wallCollisionEnabled,
+      paredes: modalWalls,
     };
 
     if (editingExistingSceneId) {
@@ -660,68 +670,75 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
                             <span>{scene.tamanhoGradePx}px</span>
                           </div>
 
-                          {/* GM Actions for Scene: Rename, Edit Grid, Delete Map */}
+                          {/* GM Actions for Scene: Rename, Edit Grid, Toggle Wall Collision, Delete Map */}
                           {isGM && (
-                            <div className="pt-1 border-t border-zinc-800/80 flex items-center justify-between gap-1">
+                            <div className="pt-1 border-t border-zinc-800/80 space-y-1">
                               <button
                                 type="button"
+                                data-testid={`scene-card-wall-toggle-${scene.id}`}
                                 onClick={() => {
-                                  setRenamingSceneId(scene.id);
-                                  setRenameSceneText(scene.nome);
+                                  const nextActive = !scene.colisaoParedesAtiva;
+                                  onUpdateSceneDimensions(
+                                    scene.id,
+                                    scene.larguraQuadrados,
+                                    scene.alturaQuadrados,
+                                    scene.tamanhoGradePx,
+                                    {
+                                      colisaoParedesAtiva: nextActive,
+                                      paredes: scene.paredes || [],
+                                    }
+                                  );
                                 }}
-                                className="flex-1 py-1 px-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] font-medium text-zinc-200 flex items-center justify-center gap-1 cursor-pointer"
-                                title="Alterar nome do mapa"
-                                aria-label={`Alterar nome do mapa ${scene.nome}`}
+                                className={`w-full py-1 px-1.5 rounded text-[10px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  scene.colisaoParedesAtiva
+                                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30'
+                                    : 'bg-zinc-800/90 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+                                }`}
+                                title="Ativar/Desativar Colisão de Paredes, Portas e Luz Raycasting neste mapa"
                               >
-                                <Edit3 className="w-3 h-3" /> Nome
+                                <BrickWall className="w-3 h-3" />
+                                {scene.colisaoParedesAtiva
+                                  ? `Paredes & Portas: ON (${(scene.paredes || []).length})`
+                                  : 'Paredes & Portas: OFF'}
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => openEditCurrentSceneModal(scene)}
-                                className="flex-1 py-1 px-1.5 rounded bg-zinc-800 hover:bg-violet-600 text-[10px] font-medium text-zinc-200 hover:text-white flex items-center justify-center gap-1 cursor-pointer"
-                                title="Editar tamanho e grade do mapa"
-                                aria-label={`Editar mapa ${scene.nome}`}
-                              >
-                                <Sliders className="w-3 h-3" /> Editar
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteScene(scene.id)}
-                                className="p-1 rounded bg-zinc-800 hover:bg-rose-900/70 text-zinc-400 hover:text-rose-300 cursor-pointer"
-                                title="Apagar mapa"
-                                aria-label={`Apagar mapa ${scene.nome}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center justify-between gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRenamingSceneId(scene.id);
+                                    setRenameSceneText(scene.nome);
+                                  }}
+                                  className="flex-1 py-1 px-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] font-medium text-zinc-200 flex items-center justify-center gap-1 cursor-pointer"
+                                  title="Alterar nome do mapa"
+                                  aria-label={`Alterar nome do mapa ${scene.nome}`}
+                                >
+                                  <Edit3 className="w-3 h-3" /> Nome
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openEditCurrentSceneModal(scene)}
+                                  className="flex-1 py-1 px-1.5 rounded bg-zinc-800 hover:bg-violet-600 text-[10px] font-medium text-zinc-200 hover:text-white flex items-center justify-center gap-1 cursor-pointer"
+                                  title="Editar tamanho, grade, paredes e portas do mapa"
+                                  aria-label={`Editar mapa ${scene.nome}`}
+                                >
+                                  <Sliders className="w-3 h-3" /> Editar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteScene(scene.id)}
+                                  className="p-1 rounded bg-zinc-800 hover:bg-rose-900/70 text-zinc-400 hover:text-rose-300 cursor-pointer"
+                                  title="Apagar mapa"
+                                  aria-label={`Apagar mapa ${scene.nome}`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
                       </div>
                     );
                   })}
-
-                  {isGM && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingExistingSceneId(null);
-                        setSceneName(`Mapa #${scenes.length + 1}`);
-                        setSceneBgDataUrl('');
-                        setMapWidthSquares(24);
-                        setMapHeightSquares(16);
-                        setDefaultWidthSquares(24);
-                        setDefaultHeightSquares(16);
-                        setAspectRatio(24 / 16);
-                        setAspectLocked(true);
-                        setMapGridPx(64);
-                        setSceneModalOpen(true);
-                      }}
-                      className="h-36 rounded-xl border border-dashed border-zinc-700 hover:border-violet-500 flex flex-col items-center justify-center gap-1.5 text-zinc-400 hover:text-violet-300 bg-[#14151c]/50 transition-colors cursor-pointer"
-                    >
-                      <Plus className="w-5 h-5" />
-                      <span className="text-xs font-medium">Criar Cena com Grade</span>
-                    </button>
-                  )}
                 </>
               ) : (
                 <>
@@ -1383,6 +1400,61 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
                       <CloudFog className="w-3.5 h-3.5" /> Preenchida
                     </button>
                   </div>
+                </div>
+
+                {/* Manual Wall Collision & Interactive Doors Section */}
+                <div className="space-y-2 pt-2 border-t border-zinc-800">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                      <BrickWall className="w-3.5 h-3.5" />
+                      Colisão de Paredes & Portas
+                    </div>
+                    <span className="text-[10px] font-mono text-zinc-400">
+                      {modalWalls.length} segs
+                    </span>
+                  </div>
+                  <span className="block text-[10px] text-zinc-400 leading-relaxed">
+                    Bloqueia passagem de tokens, luz e sombra nas paredes e portas fechadas desenhadas manualmente pelo Mestre.
+                  </span>
+                  <div className="grid grid-cols-2 bg-[#171821] p-1 rounded-xl border border-zinc-800 gap-1">
+                    <button
+                      type="button"
+                      data-testid="scene-modal-wall-collision-off"
+                      onClick={() => setWallCollisionEnabled(false)}
+                      className={`py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 cursor-pointer ${
+                        !wallCollisionEnabled
+                          ? 'bg-zinc-700 text-white'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Desativado
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="scene-modal-wall-collision-on"
+                      onClick={() => setWallCollisionEnabled(true)}
+                      className={`py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 cursor-pointer font-semibold ${
+                        wallCollisionEnabled
+                          ? 'bg-amber-500 text-zinc-950'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      <BrickWall className="w-3.5 h-3.5" /> Ativado
+                    </button>
+                  </div>
+
+                  {modalWalls.length > 0 && (
+                    <div className="flex items-center justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setModalWalls([])}
+                        className="py-1.5 px-2.5 rounded-lg bg-zinc-800 hover:bg-rose-900/50 text-[10px] font-semibold text-zinc-300 hover:text-rose-300 cursor-pointer"
+                        title="Limpar todas as paredes desta cena"
+                      >
+                        Limpar Paredes ({modalWalls.length})
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 

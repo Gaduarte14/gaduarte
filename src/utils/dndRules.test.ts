@@ -549,3 +549,275 @@ test('Token Fog Memory (memoriaExplorada) records path where player token walked
   assert.equal(circlesWithPlacedLight[0].tokenId, placedLight.id);
   assert.equal(circlesWithPlacedLight[0].lightRadiusPx, 5 * 64);
 });
+
+test('Wall collision & Door open/close system: solid walls and closed doors block both token movement and light/vision rays; open doors allow passage', async () => {
+  const {
+    resolveTokenMovementWithWalls,
+    computeVisibilityPolygon,
+    computePlayerExploredMemoryCircles,
+    isPointVisibleFromOrigin,
+    getBlockingWallsPx,
+    isTokenInsideFog,
+    insertWallOrDoorSegment,
+  } = await import('./dndRules.ts');
+  type WallSeg = import('../types/vtt.ts').MapWallSegment;
+
+  // Vertical wall at x = 10 from y = 0 to y = 4, and a door from y = 4 to y = 6
+  const wallsWithClosedDoor: WallSeg[] = [
+    { id: 'w-1', x1: 10, y1: 0, x2: 10, y2: 4, tipo: 'parede' },
+    { id: 'd-1', x1: 10, y1: 4, x2: 10, y2: 6, tipo: 'porta', aberta: false },
+  ];
+
+  // 1. Token at (8, 2) trying to walk East across the solid wall at x=10 to (12, 2) -> BLOCKED!
+  const moveAgainstWall = resolveTokenMovementWithWalls(8, 2, 12, 2, 1, 1, wallsWithClosedDoor, true);
+  assert.equal(moveAgainstWall.collided, true);
+  assert.ok(moveAgainstWall.x <= 9, `Token should stop cleanly before wall at x=10, got x=${moveAgainstWall.x}`);
+
+  // 2. Token at (8, 4.5) trying to walk East through the CLOSED door at x=10 (y=4..6) to (12, 4.5) -> BLOCKED!
+  const moveAgainstClosedDoor = resolveTokenMovementWithWalls(
+    8,
+    4.5,
+    12,
+    4.5,
+    1,
+    1,
+    wallsWithClosedDoor,
+    true
+  );
+  assert.equal(moveAgainstClosedDoor.collided, true);
+  assert.ok(moveAgainstClosedDoor.x <= 9, 'Token should not pass through a closed door');
+
+  // 3. Light/vision ray from (8.5*64, 4.5*64) to (11.5*64, 4.5*64) across the CLOSED door -> BLOCKED!
+  const closedWallsPx = getBlockingWallsPx(wallsWithClosedDoor, 64, true);
+  assert.equal(
+    isPointVisibleFromOrigin(8.5 * 64, 4.5 * 64, 11.5 * 64, 4.5 * 64, 6 * 64, closedWallsPx),
+    false
+  );
+
+  // Visibility polygon with closed door does not extend past x = 10 * 64 along y = 4.5 * 64
+  const polyClosed = computeVisibilityPolygon(8.5 * 64, 4.5 * 64, 5 * 64, closedWallsPx);
+  const maxXNearDoorClosed = Math.max(
+    ...polyClosed
+      .filter((p) => Math.abs(p.y - 4.5 * 64) < 20)
+      .map((p) => p.x)
+  );
+  assert.ok(maxXNearDoorClosed <= 10 * 64 + 1, `Ray should stop at closed door x=${10 * 64}`);
+
+  // 4. Now OPEN the door (`aberta: true`)!
+  const wallsWithOpenDoor: WallSeg[] = [
+    { id: 'w-1', x1: 10, y1: 0, x2: 10, y2: 4, tipo: 'parede' },
+    { id: 'd-1', x1: 10, y1: 4, x2: 10, y2: 6, tipo: 'porta', aberta: true },
+  ];
+
+  // Token at (8, 4.5) walking through the OPEN door to (12, 4.5) -> PASSES FREELY!
+  const moveThroughOpenDoor = resolveTokenMovementWithWalls(
+    8,
+    4.5,
+    12,
+    4.5,
+    1,
+    1,
+    wallsWithOpenDoor,
+    true
+  );
+  assert.equal(moveThroughOpenDoor.collided, false);
+  assert.equal(moveThroughOpenDoor.x, 12);
+
+  // Light/vision ray across the OPEN door -> PASSES FREELY!
+  const openWallsPx = getBlockingWallsPx(wallsWithOpenDoor, 64, true);
+  assert.equal(
+    isPointVisibleFromOrigin(8.5 * 64, 4.5 * 64, 11.5 * 64, 4.5 * 64, 6 * 64, openWallsPx),
+    true
+  );
+
+  // 5. Token inside Fog of War behind a closed door is hidden, and becomes visible as soon as the door opens!
+  const hero: MapToken = {
+    id: 'tok-elara',
+    nome: 'Elara',
+    categoria: 'character',
+    fichaId: 'char-elara',
+    x: 8,
+    y: 4,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#8b5cf6',
+    imagemUrl: '',
+    visaoQuadrados: 6,
+    luzQuadrados: 5,
+    luzCor: '#f59e0b',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+  const goblinBehindDoor: MapToken = {
+    id: 'tok-gob',
+    nome: 'Goblin',
+    categoria: 'character',
+    x: 11,
+    y: 4,
+    larguraQuadrados: 1,
+    alturaQuadrados: 1,
+    rotacao: 0,
+    cor: '#ef4444',
+    imagemUrl: '',
+    visaoQuadrados: 0,
+    luzQuadrados: 0,
+    luzCor: '#ef4444',
+    ocultoParaJogadores: false,
+    bloqueado: false,
+    condicoes: [],
+  };
+
+  assert.equal(
+    isTokenInsideFog(goblinBehindDoor, [hero, goblinBehindDoor], [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-elara',
+      paredes: wallsWithClosedDoor,
+      colisaoParedesAtiva: true,
+    }),
+    true,
+    'Goblin behind closed door should be hidden in fog'
+  );
+
+  assert.equal(
+    isTokenInsideFog(goblinBehindDoor, [hero, goblinBehindDoor], [mockSheet], true, 64, {
+      viewerRole: 'jogador',
+      viewerSheetId: 'char-elara',
+      paredes: wallsWithOpenDoor,
+      colisaoParedesAtiva: true,
+    }),
+    false,
+    'Goblin behind open door should be revealed by light/vision'
+  );
+
+  // 6. Closed Room Shadow & Memory Test:
+  // A 4-walled room [10..15] x [2..6] with a closed door on its West wall (x=10, y=3..5).
+  // When a hero approaches right next to the closed door (at x=9, y=3.5) with active Light and Vision,
+  // neither the active visibility polygon NOR the explored memory polygon ever enters the room (x > 10*64)!
+  const closedRoomWalls: WallSeg[] = [
+    { id: 'rm-top', x1: 10, y1: 2, x2: 15, y2: 2, tipo: 'parede' },
+    { id: 'rm-right', x1: 15, y1: 2, x2: 15, y2: 6, tipo: 'parede' },
+    { id: 'rm-bot', x1: 10, y1: 6, x2: 15, y2: 6, tipo: 'parede' },
+    { id: 'rm-w1', x1: 10, y1: 2, x2: 10, y2: 3, tipo: 'parede' },
+    { id: 'rm-door', x1: 10, y1: 3, x2: 10, y2: 5, tipo: 'porta', aberta: false },
+    { id: 'rm-w2', x1: 10, y1: 5, x2: 10, y2: 6, tipo: 'parede' },
+  ];
+  const closedRoomPx = getBlockingWallsPx(closedRoomWalls, 64, true);
+
+  const heroAtClosedDoor: MapToken = {
+    ...hero,
+    x: 9,
+    y: 3.5,
+    memoriaExplorada: [
+      { x: 9.5, y: 4.0, raioQuadrados: 6 },
+      // Even if a stale memory point existed inside the room (12.5, 4.0), it is filtered out while the door is closed!
+      { x: 12.5, y: 4.0, raioQuadrados: 6 },
+    ],
+  };
+
+  const memCirclesNearClosedRoom = computePlayerExploredMemoryCircles([heroAtClosedDoor], 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-elara',
+    paredes: closedRoomWalls,
+    colisaoParedesAtiva: true,
+  });
+  assert.equal(
+    memCirclesNearClosedRoom.length,
+    1,
+    'Occluded memory points inside a closed room must not be returned while outside with the door closed'
+  );
+
+  // Verify the memory polygon clipped by closedRoomPx has ZERO vertices inside the closed room (x > 10*64 + 0.5, y in 2*64..6*64)
+  const memPoly = computeVisibilityPolygon(
+    memCirclesNearClosedRoom[0].xPx,
+    memCirclesNearClosedRoom[0].yPx,
+    memCirclesNearClosedRoom[0].radiusPx,
+    closedRoomPx
+  );
+  const leakedPoints = memPoly.filter(
+    (pt) => pt.x > 10 * 64 + 0.5 && pt.x < 15 * 64 && pt.y > 2 * 64 + 0.5 && pt.y < 6 * 64 - 0.5
+  );
+  assert.equal(
+    leakedPoints.length,
+    0,
+    'Zero vertices of the clipped memory or light polygon may enter the closed room'
+  );
+
+  // Also test approaching from the East (so the wall is to the West of the token, crossing the +-PI angle seam)
+  const heroEastOfRoom: MapToken = {
+    ...hero,
+    x: 15,
+    y: 3.5,
+  };
+  const eastPoly = computeVisibilityPolygon(
+    (heroEastOfRoom.x + 0.5) * 64,
+    (heroEastOfRoom.y + 0.5) * 64,
+    6 * 64,
+    closedRoomPx
+  );
+  const leakedFromEast = eastPoly.filter(
+    (pt) => pt.x > 10 * 64 && pt.x < 15 * 64 - 0.5 && pt.y > 2 * 64 + 0.5 && pt.y < 6 * 64 - 0.5
+  );
+  assert.equal(
+    leakedFromEast.length,
+    0,
+    'Zero vertices may leak across the West wall (+-PI angle branch cut) into the closed room'
+  );
+
+  // 7. Manual Door Drawn Over Existing Wall (`insertWallOrDoorSegment`):
+  // Drawing a door from (10, 3) to (10, 5) over a solid wall (10, 2)->(10, 6) carves the wall so opening the door lets light pass
+  const solidWallOnly: WallSeg[] = [
+    { id: 'wall-full', x1: 10, y1: 2, x2: 10, y2: 6, tipo: 'parede' },
+  ];
+  const carvedWalls = insertWallOrDoorSegment(solidWallOnly, {
+    id: 'door-carved',
+    x1: 10,
+    y1: 3,
+    x2: 10,
+    y2: 5,
+    tipo: 'porta',
+    aberta: true,
+  });
+  const carvedBlockingPx = getBlockingWallsPx(carvedWalls, 64, true);
+  assert.equal(
+    isPointVisibleFromOrigin(8.5 * 64, 4.0 * 64, 11.5 * 64, 4.0 * 64, 6 * 64, carvedBlockingPx),
+    true,
+    'Opening a door drawn on top of an existing wall should allow light and vision to pass through the carved doorway'
+  );
+});
+
+test('Smooth Light Falloff: computeLightFalloffIntensity and buildSmoothFalloffGradientStops decay monotonically from 1 at center to 0 at boundary', async () => {
+  const { computeLightFalloffIntensity, buildSmoothFalloffGradientStops } = await import(
+    './dndRules.ts'
+  );
+
+  // Center (d = 0) has maximum intensity 1.0
+  assert.equal(computeLightFalloffIntensity(0, 0.5), 1);
+
+  // Boundary (d = 1) has zero intensity 0.0
+  assert.equal(computeLightFalloffIntensity(1, 0.5), 0);
+  assert.equal(computeLightFalloffIntensity(1.2, 0.5), 0);
+
+  // At default falloff = 0.5, exponent = 2 -> (1 - d^2)^2
+  // For d = 0.5 -> (1 - 0.25)^2 = 0.75^2 = 0.5625
+  assert.equal(computeLightFalloffIntensity(0.5, 0.5), 0.5625);
+
+  // Higher falloff (1.0) decays faster than lower falloff (0.0) at intermediate distance d = 0.6
+  const gentle = computeLightFalloffIntensity(0.6, 0.0);
+  const natural = computeLightFalloffIntensity(0.6, 0.5);
+  const fast = computeLightFalloffIntensity(0.6, 1.0);
+  assert.ok(gentle > natural && natural > fast);
+
+  // Gradient stops are strictly decreasing from 1.0 to 0.0
+  const stops = buildSmoothFalloffGradientStops(0.5);
+  assert.equal(stops[0].offset, 0);
+  assert.equal(stops[0].intensity, 1);
+  assert.equal(stops[stops.length - 1].offset, 1);
+  assert.equal(stops[stops.length - 1].intensity, 0);
+  for (let i = 1; i < stops.length; i++) {
+    assert.ok(stops[i].intensity < stops[i - 1].intensity);
+  }
+});
+
+

@@ -42,6 +42,7 @@ import {
 import { rollInput, type ParsedRollGroup, type RollMode } from '../utils/engine.ts';
 import type { DamageHistoryEntry } from '../utils/dano.ts';
 import { buildPrivateOwnerKey } from '../utils/questPortalNotesEngine.ts';
+import { getVisibleSheetsForTabletopPlayer } from '../utils/roomAccessEngine.ts';
 import { QuestPortalNotesModule } from './QuestPortalNotesModule.tsx';
 
 interface RightQuestPortalSidebarProps {
@@ -159,7 +160,17 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
   const [newTrackType, setNewTrackType] = useState<'musica' | 'ambiente' | 'efeito'>('musica');
   const [musicError, setMusicError] = useState('');
 
-  const activeSheet = sheets.find((s) => s.id === activeSheetId) || sheets[0];
+  const visibleSheets = getVisibleSheetsForTabletopPlayer(
+    sheets,
+    userRole,
+    activeSheetId,
+    sessionId
+  );
+  const activeSheet =
+    visibleSheets.find((s) => s.id === activeSheetId) ||
+    visibleSheets[0] ||
+    sheets.find((s) => s.id === activeSheetId) ||
+    sheets[0];
 
   // Toggle Advantage / Disadvantage: NEVER rolls when clicked, only arms/disarms mode!
   const handleToggleMode = (targetMode: 'adv' | 'dis') => {
@@ -339,18 +350,28 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
         <div className="px-3 py-2 bg-[#1c1d28] border-b border-zinc-800/80 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-[11px] text-zinc-400">Rolando como:</span>
-            <select
-              aria-label="Selecionar Personagem Ativo para Rolagem"
-              value={activeSheet.id}
-              onChange={(e) => onSelectActiveSheet(e.target.value)}
-              className="bg-[#12131a] border border-zinc-700 rounded-lg px-2 py-1 text-xs font-semibold text-white focus:outline-none focus:border-violet-500 truncate"
-            >
-              {sheets.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.nomePersonagem}
-                </option>
-              ))}
-            </select>
+            {userRole === 'mestre' ? (
+              <select
+                aria-label="Selecionar Personagem Ativo para Rolagem"
+                value={activeSheet.id}
+                onChange={(e) => onSelectActiveSheet(e.target.value)}
+                className="bg-[#12131a] border border-zinc-700 rounded-lg px-2 py-1 text-xs font-semibold text-white focus:outline-none focus:border-violet-500 truncate"
+              >
+                {sheets.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nomePersonagem}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span
+                data-testid="sidebar-locked-character-name"
+                className="bg-[#12131a] border border-emerald-500/40 rounded-lg px-2.5 py-1 text-xs font-semibold text-emerald-300 truncate"
+                title="Personagem selecionado em Fichas de Personagens Salvas"
+              >
+                {activeSheet.nomePersonagem}
+              </span>
+            )}
           </div>
 
           <button
@@ -1056,7 +1077,7 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
       {/* ===================================================================== */}
       {activeTab === 'fichas' && (
         <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-          {sheets.map((sheet) => {
+          {visibleSheets.map((sheet) => {
             const initMod = calculateInitiativeModifier(sheet);
             const isRenaming = renamingSheetId === sheet.id;
             return (
@@ -1212,11 +1233,7 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
             userRole={userRole}
             personagemId={activeSheet?.id || 'default'}
             nomePersonagem={activeSheet?.nomePersonagem || 'Personagem'}
-            classePersonagem={
-              activeSheet?.classe
-                ? `${activeSheet.classe}${activeSheet.subclasse ? ` (${activeSheet.subclasse})` : ''}`
-                : activeSheet?.classeNivel || 'Aventureiro'
-            }
+            classePersonagem={activeSheet?.classeNivel || 'Aventureiro'}
             nivelPersonagem={activeSheet?.nivel || 5}
             onRoll={(expressaoResolvida) => {
               executeRollText(expressaoResolvida);
