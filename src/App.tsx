@@ -28,7 +28,26 @@ import {
   Copy,
   KeyRound,
   Check,
+  ChevronUp,
+  Eye,
+  EyeOff,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
+import {
+  auth,
+  db,
+  doc,
+  onAuthStateChanged,
+  onSnapshot,
+  setDoc,
+  signInWithGoogle,
+  logoutFirebase,
+  OperationType,
+  handleFirestoreError,
+  sanitizeForFirestore,
+  type FirebaseUser,
+} from './firebase.ts';
 import { INITIAL_CAMPAIGN_STATE } from './data/initialCampaign.ts';
 import type {
   AssetFolder,
@@ -80,70 +99,25 @@ import {
 } from './components/OwlbearRoomsScreen.tsx';
 import { PersistentAudioEngine } from './components/PersistentAudioEngine.tsx';
 
-const LOCAL_STORAGE_KEY = 'owlbear_quest_vtt_state_v1';
-const SESSION_ID_KEY = 'owlbear_quest_session_id_v1';
 const USER_ROLE_STORAGE_KEY = 'owlbear_quest_user_role_v1';
 
-function getOrCreateClientSessionId(): string {
-  try {
-    const existing = localStorage.getItem(SESSION_ID_KEY);
-    if (existing) return existing;
-    const created = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    localStorage.setItem(SESSION_ID_KEY, created);
-    return created;
-  } catch {
-    return `sess-${Date.now()}`;
-  }
-}
+const clientSessionIdSingleton = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 export default function App() {
-  const [sessionId] = useState<string>(() => getOrCreateClientSessionId());
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(() => auth.currentUser);
+  const [authError, setAuthError] = useState<string>('');
+  const [sessionId, setSessionId] = useState<string>(
+    () => auth.currentUser?.uid || clientSessionIdSingleton
+  );
 
-  // Load initial campaign state from localStorage or fallback to deterministic seed data
-  const [campaign, setCampaign] = useState<CampaignState>(() => {
-    try {
-      // Remove legacy GM lock key that could block switching roles on deployed sites
-      localStorage.removeItem('owlbear_quest_gm_lock_v1');
-    } catch {
-      // ignore
-    }
+  // Initial campaign state seeded and synchronized in real-time via Firestore onSnapshot
+  const [campaign, setCampaign] = useState<CampaignState>(() => ({
+    ...INITIAL_CAMPAIGN_STATE,
+    mestreSessionId: null,
+    mestreNome: 'Phap La (you)',
+  }));
 
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && Array.isArray(parsed.cenas) && Array.isArray(parsed.fichas)) {
-          const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
-          const hydratedCenas = parsed.cenas.map((c: MapScene) => {
-            if (c.id === 'scene-crypt' && (!c.paredes || c.paredes.length === 0)) {
-              return {
-                ...c,
-                colisaoParedesAtiva: c.colisaoParedesAtiva ?? true,
-                paredes: defaultCrypt.paredes,
-              };
-            }
-            return c;
-          });
-          return {
-            ...parsed,
-            cenas: hydratedCenas,
-            mestreSessionId: null,
-            mestreNome: 'Phap La (you)',
-            logsCombate: INITIAL_CAMPAIGN_STATE.logsCombate,
-          };
-        }
-      }
-    } catch {
-      // ignore storage errors
-    }
-    return {
-      ...INITIAL_CAMPAIGN_STATE,
-      mestreSessionId: null,
-      mestreNome: 'Phap La (you)',
-    };
-  });
-
-  // Owlbear Rodeo Rooms State (Tela Inicial de Salas)
+  // Owlbear Rodeo Rooms State (Tela Inicial de Salas) synchronized via Firestore onSnapshot
   const [owlbearRooms, setOwlbearRooms] = useState<OwlbearRoomItem[]>(() =>
     loadSavedOwlbearRooms(
       campaign.nomeCampanha,
@@ -151,6 +125,9 @@ export default function App() {
       campaign.capaCampanhaUrl
     )
   );
+
+  // Toggle to hide/show the top-left Players & Mestre/Jogador panel
+  const [playersPanelOpen, setPlayersPanelOpen] = useState<boolean>(true);
 
   // UI Navigation States:
   // Normal flow: Tela Inicial de Salas (`showRoomsScreen`) -> Campaign Hub (`showCampaignHub`) -> Mesa Tática
@@ -317,20 +294,137 @@ export default function App() {
     }
   };
 
-  // 60 FPS Optimization: Debounce localStorage serialization so dragging/panning/doors never stall the main thread
+  // Firebase Auth listener + Google Login / Logout handlers
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      try {
-        const persistedCopy = { ...campaign, logsCombate: [] };
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(persistedCopy));
-      } catch {
-        // ignore quota errors
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      setFirebaseUser(u);
+      if (u) {
+        setSessionId(u.uid);
+        if (u.displayName) {
+          setUserName(u.displayName);
+        }
+      } else {
+        setSessionId(clientSessionIdSingleton);
       }
+    });
+    return () => unsubAuth();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    setAuthError('');
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthError(`Aviso ao autenticar com Google: ${msg}`);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    setAuthError('');
+    try {
+      await logoutFirebase();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthError(`Erro ao sair: ${msg}`);
+    }
+  };
+
+  // Real-time Firestore listener (onSnapshot) for User Rooms (/users/{uid})
+  useEffect(() => {
+    if (!firebaseUser) return;
+    const userDocPath = `users/${firebaseUser.uid}`;
+    const userDocRef = doc(db, 'users', firebaseUser.uid);
+
+    const unsub = onSnapshot(
+      userDocRef,
+      (snap) => {
+        if (!snap.exists()) {
+          // Seed initial user profile & rooms in Firestore
+          saveOwlbearRooms(owlbearRooms);
+          return;
+        }
+        const data = snap.data();
+        if (Array.isArray(data.rooms) && data.rooms.length > 0) {
+          setOwlbearRooms(data.rooms as OwlbearRoomItem[]);
+        }
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, userDocPath);
+      }
+    );
+
+    return () => unsub();
+  }, [firebaseUser]);
+
+  // Real-time Firestore listener (onSnapshot) for active Campaign Room (/campaigns/{codigoSala})
+  const isFirestoreCampaignSnapshotRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (!firebaseUser || !campaign.codigoSala) return;
+    const roomDocPath = `campaigns/${campaign.codigoSala}`;
+    const roomDocRef = doc(db, 'campaigns', campaign.codigoSala);
+
+    const unsub = onSnapshot(
+      roomDocRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const remoteCampaign = data.campaign as CampaignState | undefined;
+        if (
+          remoteCampaign &&
+          Array.isArray(remoteCampaign.cenas) &&
+          Array.isArray(remoteCampaign.fichas)
+        ) {
+          isFirestoreCampaignSnapshotRef.current = true;
+          isRemoteUpdateRef.current = true;
+          setCampaign((prev) => ({
+            ...remoteCampaign,
+            logsCombate:
+              Array.isArray(remoteCampaign.logsCombate) &&
+              remoteCampaign.logsCombate.length > 0
+                ? remoteCampaign.logsCombate
+                : prev.logsCombate,
+          }));
+          window.setTimeout(() => {
+            isRemoteUpdateRef.current = false;
+            isFirestoreCampaignSnapshotRef.current = false;
+          }, 25);
+        }
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, roomDocPath);
+      }
+    );
+
+    return () => unsub();
+  }, [firebaseUser, campaign.codigoSala]);
+
+  // 60 FPS Optimization: Debounced Firestore write (setDoc) so dragging/panning/doors never stall the main thread
+  useEffect(() => {
+    if (!firebaseUser || !campaign.codigoSala || isFirestoreCampaignSnapshotRef.current) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const roomDocPath = `campaigns/${campaign.codigoSala}`;
+      const roomDocRef = doc(db, 'campaigns', campaign.codigoSala);
+      setDoc(
+        roomDocRef,
+        sanitizeForFirestore({
+          ownerId: firebaseUser.uid,
+          codigoSala: campaign.codigoSala,
+          nomeCampanha: campaign.nomeCampanha,
+          campaign,
+          updatedAt: Date.now(),
+        }),
+        { merge: true }
+      ).catch((err) => {
+        handleFirestoreError(err, OperationType.WRITE, roomDocPath);
+      });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [campaign]);
+  }, [campaign, firebaseUser]);
 
-  // Sync state to BroadcastChannel + WebSocket (localStorage is persisted asynchronously above for locked 60 FPS)
+  // Sync state to BroadcastChannel + WebSocket (Firestore is persisted asynchronously above for locked 60 FPS)
   const commitCampaignState = (updater: (prev: CampaignState) => CampaignState) => {
     setCampaign((prev) => {
       const next = updater(prev);
@@ -1372,167 +1466,254 @@ export default function App() {
           >
             <Box className="w-4 h-4" />
           </button>
+
+          <button
+            type="button"
+            data-testid="toggle-players-panel-btn"
+            onClick={() => setPlayersPanelOpen((prev) => !prev)}
+            aria-label={
+              playersPanelOpen
+                ? 'Ocultar aba de Players e Mestre'
+                : 'Mostrar aba de Players e Mestre'
+            }
+            title={
+              playersPanelOpen
+                ? 'Ocultar aba de Players e Mestre'
+                : 'Mostrar aba de Players e Mestre'
+            }
+            className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
+              playersPanelOpen
+                ? 'bg-zinc-700/70 text-white'
+                : 'text-zinc-400 hover:bg-zinc-700/60 hover:text-white'
+            }`}
+          >
+            {playersPanelOpen ? (
+              <EyeOff className="w-4 h-4" />
+            ) : (
+              <Eye className="w-4 h-4" />
+            )}
+          </button>
         </div>
 
-        {/* Owlbear "Players" Card + Room Code + Fixed Role Badge + Character Access */}
-        <div
-          className={`w-64 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl p-3.5 shadow-2xl pointer-events-auto ${
-            sidebarOpen ? 'hidden md:block' : 'block'
-          }`}
-        >
-          <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-700/80">
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm font-bold text-white">Players</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
-                {userRole === 'mestre' ? 'Modo Mestre' : 'Modo Jogador'}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowCampaignHub(true)}
-              aria-label="Criar ou adicionar personagem à campanha"
-              title="Abrir Tela Inicial da Campanha"
-              className="p-1 rounded-lg text-zinc-300 hover:text-white hover:bg-zinc-700/60 transition-colors cursor-pointer"
-            >
-              <UserPlus className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Prominent Unique Room Code + Copy Button */}
-          <div
-            data-testid="tabletop-room-code-badge"
-            className="mb-2 px-2.5 py-1.5 rounded-xl bg-[#181922] border border-violet-500/40 flex items-center justify-between gap-2"
+        {/* Collapsed Pill when Players & Mestre Card is hidden */}
+        {!playersPanelOpen && (
+          <button
+            type="button"
+            data-testid="show-players-panel-btn"
+            onClick={() => setPlayersPanelOpen(true)}
+            className="w-fit bg-[#232530]/95 hover:bg-[#2c2f3e] border border-zinc-700/80 rounded-xl px-3 py-1.5 shadow-xl pointer-events-auto flex items-center gap-2 text-xs font-semibold text-zinc-200 hover:text-white transition-colors cursor-pointer"
+            title="Mostrar aba de Players e Mestre"
           >
-            <div className="flex items-center gap-1.5 min-w-0">
-              <KeyRound className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-              <div className="min-w-0">
-                <span className="block text-[9px] uppercase tracking-wider text-zinc-400 font-semibold leading-none">
-                  Código da Sala
-                </span>
-                <span className="text-xs font-mono font-extrabold text-violet-300 tracking-wider">
-                  {campaign.codigoSala}
+            <Eye className="w-3.5 h-3.5 text-violet-400" />
+            <span>Mostrar Players ({userRole === 'mestre' ? 'Mestre' : 'Jogador'})</span>
+          </button>
+        )}
+
+        {/* Owlbear "Players" Card + Room Code + Fixed Role Badge + Character Access */}
+        {playersPanelOpen && (
+          <div
+            data-testid="tabletop-players-panel"
+            className="w-64 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl p-3.5 shadow-2xl pointer-events-auto block"
+          >
+            <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-700/80">
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm font-bold text-white">Players</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                  {userRole === 'mestre' ? 'Modo Mestre' : 'Modo Jogador'}
                 </span>
               </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setShowCampaignHub(true)}
+                  aria-label="Criar ou adicionar personagem à campanha"
+                  title="Abrir Tela Inicial da Campanha"
+                  className="p-1 rounded-lg text-zinc-300 hover:text-white hover:bg-zinc-700/60 transition-colors cursor-pointer"
+                >
+                  <UserPlus className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  data-testid="hide-players-panel-btn"
+                  onClick={() => setPlayersPanelOpen(false)}
+                  aria-label="Ocultar aba de Players e Mestre"
+                  title="Ocultar aba de Players e Mestre"
+                  className="px-1.5 py-1 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-semibold flex items-center gap-0.5 transition-colors cursor-pointer"
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
+                  <span>Ocultar</span>
+                </button>
+              </div>
             </div>
-            <button
-              type="button"
-              data-testid="tabletop-copy-room-code-btn"
-              onClick={() => {
-                navigator.clipboard?.writeText(campaign.codigoSala).catch(() => {});
-                setCopiedTabletopCode(true);
-                window.setTimeout(() => setCopiedTabletopCode(false), 1800);
-              }}
-              className="px-2 py-1 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white border border-violet-500/40 text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shrink-0"
-              title="Copiar código único desta sala para convidar jogadores"
+
+            {/* Prominent Unique Room Code + Copy Button */}
+            <div
+              data-testid="tabletop-room-code-badge"
+              className="mb-2 px-2.5 py-1.5 rounded-xl bg-[#181922] border border-violet-500/40 flex items-center justify-between gap-2"
             >
-              {copiedTabletopCode ? (
+              <div className="flex items-center gap-1.5 min-w-0">
+                <KeyRound className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                <div className="min-w-0">
+                  <span className="block text-[9px] uppercase tracking-wider text-zinc-400 font-semibold leading-none">
+                    Código da Sala
+                  </span>
+                  <span className="text-xs font-mono font-extrabold text-violet-300 tracking-wider">
+                    {campaign.codigoSala}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="tabletop-copy-room-code-btn"
+                onClick={() => {
+                  navigator.clipboard?.writeText(campaign.codigoSala).catch(() => {});
+                  setCopiedTabletopCode(true);
+                  window.setTimeout(() => setCopiedTabletopCode(false), 1800);
+                }}
+                className="px-2 py-1 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white border border-violet-500/40 text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                title="Copiar código único desta sala para convidar jogadores"
+              >
+                {copiedTabletopCode ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-300" />
+                    <span>Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copiar</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between py-1 gap-2">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <span className="w-3 h-3 rounded-full bg-[#4ade80] shrink-0" />
+                <input
+                  type="text"
+                  aria-label="Meu Nome de Jogador"
+                  data-testid="player-identity-input"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  title="Seu nome de usuário (suas Notas e Pastas são particulares para este usuário)"
+                  className="w-full bg-transparent hover:bg-[#181922] focus:bg-[#181922] border border-transparent focus:border-violet-500/60 rounded px-1.5 py-0.5 text-xs font-medium text-zinc-100 focus:outline-none truncate"
+                />
+              </div>
+
+              <span
+                data-testid="players-card-role-badge"
+                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 select-none ${
+                  userRole === 'mestre'
+                    ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40'
+                    : 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40'
+                }`}
+                title={
+                  userRole === 'mestre'
+                    ? 'Mestre (Criador da Sala)'
+                    : 'Jogador conectado à sala'
+                }
+              >
+                {userRole === 'mestre' ? '👑 Mestre' : '🛡️ Jogador'}
+              </span>
+            </div>
+
+            {/* Compact Firebase Google Auth status inside Players Panel */}
+            <div className="mt-1.5 pt-1.5 border-t border-zinc-800/80 flex items-center justify-between gap-2">
+              {firebaseUser ? (
                 <>
-                  <Check className="w-3 h-3 text-emerald-300" />
-                  <span>Copiado!</span>
+                  <span className="text-[10px] text-emerald-300 truncate">
+                    ☁️ {firebaseUser.email || firebaseUser.displayName}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="tabletop-google-logout-btn"
+                    onClick={handleGoogleLogout}
+                    className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-rose-900/50 text-[10px] font-semibold text-rose-300 flex items-center gap-1 cursor-pointer shrink-0"
+                    title="Sair da conta Google"
+                  >
+                    <LogOut className="w-3 h-3" />
+                    <span>Sair</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="tabletop-google-login-btn"
+                  onClick={handleGoogleLogin}
+                  className="w-full py-1 px-2 rounded-lg bg-zinc-800 hover:bg-violet-600/30 border border-zinc-700 hover:border-violet-500/50 text-[10px] font-semibold text-zinc-200 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                  title="Conectar com Google (Firebase Firestore)"
+                >
+                  <LogIn className="w-3 h-3 text-violet-400" />
+                  <span>Conectar com Google</span>
+                </button>
+              )}
+            </div>
+
+            <div className="mt-2.5 pt-2.5 border-t border-zinc-800 space-y-1.5">
+              {userRole === 'mestre' ? (
+                <>
+                  <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                    <span>Personagens na Campanha</span>
+                    <span>{campaign.nomesCampanha.length}</span>
+                  </div>
+                  <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                    {campaign.nomesCampanha.map((nome) => {
+                      const ficha = campaign.fichas.find(
+                        (f) => f.nomePersonagem.toLowerCase() === nome.toLowerCase()
+                      );
+                      return (
+                        <div
+                          key={nome}
+                          onClick={() => {
+                            if (ficha) handleOpenSheetGuarded(ficha.id);
+                          }}
+                          className="flex items-center justify-between px-2 py-1 rounded-lg bg-[#181922] hover:bg-zinc-800 text-xs cursor-pointer transition-colors"
+                        >
+                          <span className="truncate font-medium text-zinc-200">{nome}</span>
+                          {ficha && (
+                            <span className="text-[10px] font-mono text-violet-400 shrink-0 ml-1">
+                              Ficha 5e
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </>
               ) : (
                 <>
-                  <Copy className="w-3 h-3" />
-                  <span>Copiar</span>
+                  <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                    <span>Sua Ficha Selecionada</span>
+                    <span>1/1</span>
+                  </div>
+                  <div className="space-y-1">
+                    {getVisibleSheetsForTabletopPlayer(
+                      campaign.fichas,
+                      userRole,
+                      activePlayingSheetId,
+                      sessionId
+                    ).map((ficha) => (
+                      <div
+                        key={ficha.id}
+                        data-testid={`player-own-sheet-row-${ficha.id}`}
+                        onClick={() => handleOpenSheetGuarded(ficha.id)}
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#181922] hover:bg-zinc-800 border border-emerald-500/30 text-xs cursor-pointer transition-colors"
+                      >
+                        <span className="truncate font-semibold text-zinc-100">
+                          {ficha.nomePersonagem}
+                        </span>
+                        <span className="text-[10px] font-mono text-emerald-400 shrink-0 ml-1">
+                          Abrir Ficha 5e
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
-            </button>
-          </div>
-
-          <div className="flex items-center justify-between py-1 gap-2">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <span className="w-3 h-3 rounded-full bg-[#4ade80] shrink-0" />
-              <input
-                type="text"
-                aria-label="Meu Nome de Jogador"
-                data-testid="player-identity-input"
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-                title="Seu nome de usuário (suas Notas e Pastas são particulares para este usuário)"
-                className="w-full bg-transparent hover:bg-[#181922] focus:bg-[#181922] border border-transparent focus:border-violet-500/60 rounded px-1.5 py-0.5 text-xs font-medium text-zinc-100 focus:outline-none truncate"
-              />
             </div>
-
-            <span
-              data-testid="players-card-role-badge"
-              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 select-none ${
-                userRole === 'mestre'
-                  ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40'
-                  : 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40'
-              }`}
-              title={
-                userRole === 'mestre'
-                  ? 'Mestre (Criador da Sala)'
-                  : 'Jogador conectado à sala'
-              }
-            >
-              {userRole === 'mestre' ? '👑 Mestre' : '🛡️ Jogador'}
-            </span>
           </div>
-
-          <div className="mt-2.5 pt-2.5 border-t border-zinc-800 space-y-1.5">
-            {userRole === 'mestre' ? (
-              <>
-                <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                  <span>Personagens na Campanha</span>
-                  <span>{campaign.nomesCampanha.length}</span>
-                </div>
-                <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
-                  {campaign.nomesCampanha.map((nome) => {
-                    const ficha = campaign.fichas.find(
-                      (f) => f.nomePersonagem.toLowerCase() === nome.toLowerCase()
-                    );
-                    return (
-                      <div
-                        key={nome}
-                        onClick={() => {
-                          if (ficha) handleOpenSheetGuarded(ficha.id);
-                        }}
-                        className="flex items-center justify-between px-2 py-1 rounded-lg bg-[#181922] hover:bg-zinc-800 text-xs cursor-pointer transition-colors"
-                      >
-                        <span className="truncate font-medium text-zinc-200">{nome}</span>
-                        {ficha && (
-                          <span className="text-[10px] font-mono text-violet-400 shrink-0 ml-1">
-                            Ficha 5e
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                  <span>Sua Ficha Selecionada</span>
-                  <span>1/1</span>
-                </div>
-                <div className="space-y-1">
-                  {getVisibleSheetsForTabletopPlayer(
-                    campaign.fichas,
-                    userRole,
-                    activePlayingSheetId,
-                    sessionId
-                  ).map((ficha) => (
-                    <div
-                      key={ficha.id}
-                      data-testid={`player-own-sheet-row-${ficha.id}`}
-                      onClick={() => handleOpenSheetGuarded(ficha.id)}
-                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#181922] hover:bg-zinc-800 border border-emerald-500/30 text-xs cursor-pointer transition-colors"
-                    >
-                      <span className="truncate font-semibold text-zinc-100">
-                        {ficha.nomePersonagem}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-400 shrink-0 ml-1">
-                        Abrir Ficha 5e
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+        )}
       </div>
 
       {/* RIGHT VERTICAL OWLBEAR TOOL PALETTE */}
@@ -2188,6 +2369,10 @@ export default function App() {
         <OwlbearRoomsScreen
           rooms={owlbearRooms}
           maxGmRooms={2}
+          firebaseUser={firebaseUser}
+          authError={authError}
+          onGoogleLogin={handleGoogleLogin}
+          onGoogleLogout={handleGoogleLogout}
           onUpdateRooms={(nextRooms) => {
             setOwlbearRooms(nextRooms);
             saveOwlbearRooms(nextRooms);

@@ -1,0 +1,57 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and personal list of VTT rooms (Mestre and Jogador).",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "description": "Firebase Auth UID of the user" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "email": { "type": "string", "description": "User email address" },
+        "photoURL": { "type": "string", "description": "User avatar URL" },
+        "rooms": { "type": "array", "description": "Saved Owlbear rooms for this user" },
+        "updatedAt": { "type": "number", "description": "Timestamp of last update" }
+      },
+      "required": ["ownerId", "updatedAt"]
+    },
+    "UserPrivateNotes": {
+      "title": "UserPrivateNotes",
+      "description": "Private markdown notes and folders owned exclusively by a single user.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "description": "Firebase Auth UID of the note owner" },
+        "notes": { "type": "array", "description": "List of private QuestPortalNote objects" },
+        "folders": { "type": "array", "description": "List of private QuestPortalFolder objects" },
+        "updatedAt": { "type": "number", "description": "Timestamp of last update" }
+      },
+      "required": ["ownerId", "notes", "folders", "updatedAt"]
+    },
+    "CampaignRoom": {
+      "title": "CampaignRoom",
+      "description": "Real-time VTT campaign state synchronized by unique room code.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "description": "Firebase Auth UID of the room creator (Mestre)" },
+        "codigoSala": { "type": "string", "description": "Unique room code (e.g., OWL-5E26)" },
+        "nomeCampanha": { "type": "string", "description": "Campaign title" },
+        "campaign": { "type": "object", "description": "Full VTT CampaignState object" },
+        "updatedAt": { "type": "number", "description": "Timestamp of last update" }
+      },
+      "required": ["ownerId", "codigoSala", "campaign", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user profile and saved VTT rooms list"
+    },
+    "/userNotes/{userId}": {
+      "schema": { "$ref": "#/entities/UserPrivateNotes" },
+      "description": "Strictly private notes and folders per user"
+    },
+    "/campaigns/{roomCode}": {
+      "schema": { "$ref": "#/entities/CampaignRoom" },
+      "description": "Real-time VTT tabletop campaign state indexed by room code"
+    }
+  }
+}

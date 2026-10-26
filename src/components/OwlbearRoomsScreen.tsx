@@ -17,6 +17,16 @@ import {
   ensureUniqueGmRoomCodes,
   generateUniqueRoomCode,
 } from '../utils/roomAccessEngine.ts';
+import {
+  auth,
+  db,
+  doc,
+  setDoc,
+  OperationType,
+  handleFirestoreError,
+  sanitizeForFirestore,
+  type FirebaseUser,
+} from '../firebase.ts';
 
 export interface OwlbearRoomItem {
   id: string;
@@ -31,7 +41,7 @@ export const OWLBEAR_ROOMS_STORAGE_KEY = 'owlbear_quest_rooms_list_v1';
 
 /**
  * Compresses/resizes an uploaded image File to a reasonable DataURL (max 880px dimension, JPEG 0.84)
- * so saving multiple room cover images in localStorage never hits browser quota limits.
+ * so saving multiple room cover images never hits payload quota limits.
  */
 export function compressRoomImageFile(file: File, maxDim: number = 880): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -75,6 +85,8 @@ export function compressRoomImageFile(file: File, maxDim: number = 880): Promise
   });
 }
 
+let memorySavedRooms: OwlbearRoomItem[] | null = null;
+
 export function loadSavedOwlbearRooms(
   defaultCampaignName: string,
   defaultCampaignCode: string,
@@ -89,32 +101,43 @@ export function loadSavedOwlbearRooms(
     criadoEm: 1710000000000,
   };
 
-  try {
-    const raw = localStorage.getItem(OWLBEAR_ROOMS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return ensureUniqueGmRoomCodes(parsed);
-      }
-    }
-  } catch {
-    // ignore storage errors
+  if (memorySavedRooms && memorySavedRooms.length > 0) {
+    return ensureUniqueGmRoomCodes(memorySavedRooms);
   }
 
   return [seedRoom];
 }
 
 export function saveOwlbearRooms(rooms: OwlbearRoomItem[]): void {
-  try {
-    localStorage.setItem(OWLBEAR_ROOMS_STORAGE_KEY, JSON.stringify(rooms));
-  } catch {
-    // ignore storage quota errors
+  const normalized = ensureUniqueGmRoomCodes(rooms);
+  memorySavedRooms = normalized;
+  const currentUser = auth.currentUser;
+  if (currentUser) {
+    const userDocPath = `users/${currentUser.uid}`;
+    setDoc(
+      doc(db, 'users', currentUser.uid),
+      sanitizeForFirestore({
+        ownerId: currentUser.uid,
+        displayName: currentUser.displayName || 'Mestre',
+        email: currentUser.email || '',
+        photoURL: currentUser.photoURL || '',
+        rooms: normalized,
+        updatedAt: Date.now(),
+      }),
+      { merge: true }
+    ).catch((err) => {
+      handleFirestoreError(err, OperationType.WRITE, userDocPath);
+    });
   }
 }
 
 interface OwlbearRoomsScreenProps {
   rooms: OwlbearRoomItem[];
   maxGmRooms?: number;
+  firebaseUser?: FirebaseUser | null;
+  authError?: string;
+  onGoogleLogin?: () => void;
+  onGoogleLogout?: () => void;
   onUpdateRooms: (nextRooms: OwlbearRoomItem[]) => void;
   onOpenRoomHub: (room: OwlbearRoomItem) => void;
 }
@@ -122,6 +145,10 @@ interface OwlbearRoomsScreenProps {
 export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
   rooms,
   maxGmRooms = 2,
+  firebaseUser,
+  authError,
+  onGoogleLogin,
+  onGoogleLogout,
   onUpdateRooms,
   onOpenRoomHub,
 }) => {
@@ -310,22 +337,73 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
 
       {/* Main Rounded Central Panel (Owlbear Rodeo Rooms Style) */}
       <div className="w-full max-w-4xl bg-[#1e2030] border border-[#2e3148] rounded-3xl shadow-2xl overflow-hidden my-auto">
-        {/* Top Header: Title + Subtitle on Left, Counter on Right */}
+        {/* Top Header: Title + Subtitle on Left, Auth & Counter on Right */}
         <div className="px-6 pt-7 pb-5 md:px-9 md:pt-8 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-bold text-[#c4b5fd] tracking-tight">
               Salas
             </h1>
             <p className="text-xs md:text-sm text-zinc-300 mt-1">
-              Crie uma sala para conectar seus jogadores
+              Crie uma sala para conectar seus jogadores em tempo real no Firebase Firestore
             </p>
           </div>
 
-          <div
-            data-testid="rooms-used-counter"
-            className="text-xs md:text-sm font-medium text-zinc-300 pt-1"
-          >
-            Salas usadas: {gmRooms.length} de {maxGmRooms}
+          <div className="flex flex-col items-end gap-2">
+            {/* Firebase Google Authentication Bar */}
+            <div className="flex items-center gap-2">
+              {firebaseUser ? (
+                <div
+                  data-testid="firebase-user-badge"
+                  className="flex items-center gap-2 bg-[#161824] border border-emerald-500/40 rounded-full pl-2 pr-3 py-1"
+                >
+                  {firebaseUser.photoURL ? (
+                    <img
+                      src={firebaseUser.photoURL}
+                      alt={firebaseUser.displayName || 'Usuário'}
+                      className="w-5 h-5 rounded-full object-cover"
+                    />
+                  ) : (
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                  )}
+                  <span className="text-xs font-semibold text-emerald-200 max-w-[140px] truncate">
+                    {firebaseUser.displayName || firebaseUser.email || 'Conectado'}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="google-logout-btn"
+                    onClick={() => onGoogleLogout?.()}
+                    className="ml-1 text-[11px] font-bold text-rose-300 hover:text-rose-200 underline cursor-pointer"
+                    title="Sair da conta Google (Logout)"
+                  >
+                    Sair
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="google-login-btn"
+                  onClick={() => onGoogleLogin?.()}
+                  className="px-3.5 py-1.5 rounded-full bg-white hover:bg-zinc-100 text-zinc-900 text-xs font-bold flex items-center gap-2 shadow-md transition-colors cursor-pointer"
+                  title="Fazer login com Google para sincronizar suas salas e campanha no Firestore"
+                >
+                  <LogIn className="w-3.5 h-3.5 text-violet-700" />
+                  <span>Entrar com Google</span>
+                </button>
+              )}
+            </div>
+
+            {authError && (
+              <span className="text-[11px] text-amber-300 max-w-xs text-right">
+                {authError}
+              </span>
+            )}
+
+            <div
+              data-testid="rooms-used-counter"
+              className="text-xs md:text-sm font-medium text-zinc-300 pt-0.5"
+            >
+              Salas usadas: {gmRooms.length} de {maxGmRooms}
+            </div>
           </div>
         </div>
 

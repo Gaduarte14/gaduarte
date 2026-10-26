@@ -270,7 +270,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     setActiveWallPencilStroke([]);
   };
 
-  // Combine scene tokens with 60fps liveDragPos & live explored memory trail so the dragged token and its fog/light/memory update instantaneously
+  // Combine scene tokens with 60fps liveDragPos so the dragged token sprite glides at native frame rate
   const effectiveTokens = useMemo(() => {
     if (!liveDragPos) return scene.tokens;
     return scene.tokens.map((t) =>
@@ -279,11 +279,35 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             ...t,
             x: liveDragPos.x,
             y: liveDragPos.y,
-            memoriaExplorada: liveDragPos.memoriaExplorada ?? t.memoriaExplorada,
           }
         : t
     );
   }, [scene.tokens, liveDragPos]);
+
+  // Quantize dragged token position to 0.5-grid steps for heavy raycasting & fog-of-war calculations
+  // so sub-pixel mouse movement never stalls the main thread at 60fps
+  const quantizedDragX = liveDragPos ? Math.round(liveDragPos.x * 2) / 2 : null;
+  const quantizedDragY = liveDragPos ? Math.round(liveDragPos.y * 2) / 2 : null;
+  const quantizedDragTokenId = liveDragPos ? liveDragPos.tokenId : null;
+
+  const fogTokens = useMemo(() => {
+    if (
+      !quantizedDragTokenId ||
+      quantizedDragX === null ||
+      quantizedDragY === null
+    ) {
+      return scene.tokens;
+    }
+    return scene.tokens.map((t) =>
+      t.id === quantizedDragTokenId
+        ? {
+            ...t,
+            x: quantizedDragX,
+            y: quantizedDragY,
+          }
+        : t
+    );
+  }, [scene.tokens, quantizedDragTokenId, quantizedDragX, quantizedDragY]);
 
   const fogViewerOptions = useMemo(
     () => ({
@@ -307,10 +331,137 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     [scene.paredes, gridSize, scene.colisaoParedesAtiva]
   );
 
-  // Render 3-Tier Dynamic Fog of War + Token Memory + Smooth Falloff Torch Light on Canvas:
-  // 1. Escuridão Total (Unexplored): 100% pitch-black ('rgba(3, 4, 7, 1.0)') for Players where their token has never illuminated/seen.
-  // 2. Memória do Token (Explored Trail): Places where the player's token already walked with active [Luz] or [Visão] stay with the semi-transparent fog ("a névoa de agora", ~0.64 alpha) instead of total darkness!
-  // 3. Visão / Luz Ativa Agora com Falloff Suave: Center has maximum intensity (d = 0 -> 1.0) and smoothly attenuates to 0 at the limit (d = 1 -> 0.0) without any hard edge or ring!
+  // Precompute token fog visibility only when quantized fogTokens change (eliminates O(N^2) raycasts per frame)
+  const tokenFogVisibilityMap = useMemo(() => {
+    const map = new Map<
+      string,
+      { insidePlayerFog: boolean; insideGlobalFogForGmBadge: boolean }
+    >();
+    const gmOptions = {
+      paredes: scene.paredes,
+      colisaoParedesAtiva: Boolean(scene.colisaoParedesAtiva),
+    };
+    for (const token of fogTokens) {
+      const insidePlayerFog =
+        userRole === 'jogador'
+          ? isTokenInsideFog(
+              token,
+              fogTokens,
+              sheets,
+              scene.nevoaAtiva,
+              gridSize,
+              fogViewerOptions
+            )
+          : false;
+      const insideGlobalFogForGmBadge =
+        userRole === 'mestre'
+          ? isTokenInsideFog(
+              token,
+              fogTokens,
+              sheets,
+              scene.nevoaAtiva,
+              gridSize,
+              gmOptions
+            )
+          : false;
+      map.set(token.id, { insidePlayerFog, insideGlobalFogForGmBadge });
+    }
+    return map;
+  }, [
+    fogTokens,
+    sheets,
+    scene.nevoaAtiva,
+    scene.paredes,
+    scene.colisaoParedesAtiva,
+    gridSize,
+    userRole,
+    fogViewerOptions,
+  ]);
+
+  // Cache Layer 2 (Explored Memory Trail) in its own offscreen canvas so historical memory circles
+  // are NEVER re-raycasted while dragging a token!
+  const hasMemoryCirclesRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (!scene.nevoaAtiva) {
+      hasMemoryCirclesRef.current = false;
+      return;
+    }
+    const memoryCircles = computePlayerExploredMemoryCircles(
+      scene.tokens,
+      gridSize,
+      fogViewerOptions
+    );
+    if (memoryCircles.length === 0) {
+      hasMemoryCirclesRef.current = false;
+      return;
+    }
+    hasMemoryCirclesRef.current = true;
+    if (!memoryCanvasRef.current) {
+      memoryCanvasRef.current = document.createElement('canvas');
+    }
+    const memCanvas = memoryCanvasRef.current;
+    if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
+      memCanvas.width = mapWidthPx;
+      memCanvas.height = mapHeightPx;
+    }
+    const memCtx = memCanvas.getContext('2d');
+    if (!memCtx) return;
+
+    memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
+    memCtx.globalCompositeOperation = 'source-over';
+    const memStops = buildSmoothFalloffGradientStops(0.45);
+    for (const mc of memoryCircles) {
+      if (mc.radiusPx <= 0) continue;
+
+      if (blockingWallsPx.length > 0) {
+        const memPoly = computeVisibilityPolygon(
+          mc.xPx,
+          mc.yPx,
+          mc.radiusPx,
+          blockingWallsPx
+        );
+        if (memPoly.length < 3) continue;
+        memCtx.save();
+        memCtx.beginPath();
+        memCtx.moveTo(memPoly[0].x, memPoly[0].y);
+        for (let i = 1; i < memPoly.length; i++) {
+          memCtx.lineTo(memPoly[i].x, memPoly[i].y);
+        }
+        memCtx.closePath();
+        memCtx.clip();
+      }
+
+      const memGrad = memCtx.createRadialGradient(
+        mc.xPx,
+        mc.yPx,
+        0,
+        mc.xPx,
+        mc.yPx,
+        mc.radiusPx
+      );
+      for (const stop of memStops) {
+        memGrad.addColorStop(stop.offset, `rgba(0, 0, 0, ${stop.intensity})`);
+      }
+      memCtx.fillStyle = memGrad;
+      memCtx.beginPath();
+      memCtx.arc(mc.xPx, mc.yPx, mc.radiusPx, 0, Math.PI * 2);
+      memCtx.fill();
+
+      if (blockingWallsPx.length > 0) {
+        memCtx.restore();
+      }
+    }
+  }, [
+    scene.tokens,
+    scene.nevoaAtiva,
+    gridSize,
+    fogViewerOptions,
+    blockingWallsPx,
+    mapWidthPx,
+    mapHeightPx,
+  ]);
+
+  // Render 3-Tier Dynamic Fog of War + Cached Token Memory + Smooth Falloff Torch Light on Canvas:
   useEffect(() => {
     const canvas = fogCanvasRef.current;
     if (!canvas) return;
@@ -329,87 +480,28 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       userRole === 'mestre' ? 'rgba(8, 9, 14, 0.66)' : 'rgba(3, 4, 7, 1.0)';
     ctx.fillRect(0, 0, mapWidthPx, mapHeightPx);
 
-    // 2. Token Memory Layer ("a névoa de agora" where the player's token already passed with [Luz] or [Visão]):
-    const memoryCircles = computePlayerExploredMemoryCircles(
-      effectiveTokens,
-      gridSize,
-      fogViewerOptions
-    );
-
-    if (memoryCircles.length > 0) {
-      if (!memoryCanvasRef.current) {
-        memoryCanvasRef.current = document.createElement('canvas');
-      }
-      const memCanvas = memoryCanvasRef.current;
-      if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
-        memCanvas.width = mapWidthPx;
-        memCanvas.height = mapHeightPx;
-      }
-      const memCtx = memCanvas.getContext('2d');
-      if (memCtx) {
-        memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
-        memCtx.globalCompositeOperation = 'source-over';
-        const memStops = buildSmoothFalloffGradientStops(0.45);
-        for (const mc of memoryCircles) {
-          if (mc.radiusPx <= 0) continue;
-
-          if (blockingWallsPx.length > 0) {
-            const memPoly = computeVisibilityPolygon(
-              mc.xPx,
-              mc.yPx,
-              mc.radiusPx,
-              blockingWallsPx
-            );
-            if (memPoly.length < 3) continue;
-            memCtx.save();
-            memCtx.beginPath();
-            memCtx.moveTo(memPoly[0].x, memPoly[0].y);
-            for (let i = 1; i < memPoly.length; i++) {
-              memCtx.lineTo(memPoly[i].x, memPoly[i].y);
-            }
-            memCtx.closePath();
-            memCtx.clip();
-          }
-
-          const memGrad = memCtx.createRadialGradient(
-            mc.xPx,
-            mc.yPx,
-            0,
-            mc.xPx,
-            mc.yPx,
-            mc.radiusPx
-          );
-          for (const stop of memStops) {
-            memGrad.addColorStop(stop.offset, `rgba(0, 0, 0, ${stop.intensity})`);
-          }
-          memCtx.fillStyle = memGrad;
-          memCtx.beginPath();
-          memCtx.arc(mc.xPx, mc.yPx, mc.radiusPx, 0, Math.PI * 2);
-          memCtx.fill();
-
-          if (blockingWallsPx.length > 0) {
-            memCtx.restore();
-          }
-        }
-
-        // Erase partial alpha from the pitch-black fog so explored memory areas stay with "a névoa de agora" (~0.64 alpha)
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.globalAlpha = userRole === 'mestre' ? 0.42 : 0.36;
-        ctx.drawImage(memCanvas, 0, 0);
-        ctx.globalAlpha = 1.0;
-      }
+    // 2. Token Memory Layer (Composited in O(1) from pre-rendered memoryCanvasRef!)
+    if (hasMemoryCirclesRef.current && memoryCanvasRef.current) {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.globalAlpha = userRole === 'mestre' ? 0.42 : 0.36;
+      ctx.drawImage(memoryCanvasRef.current, 0, 0);
+      ctx.globalAlpha = 1.0;
     }
 
-    // 3. Active Vision & Active Light Cutout with Smooth Natural Falloff (d = 0 -> 1.0 down to d = 1 -> 0.0, clipped by 2D Raycast Visibility Polygon!)
+    // 3. Active Vision & Active Light Cutout with Smooth Natural Falloff (using quantized fogTokens)
     const circles = computeDynamicTokenVisionCircles(
-      effectiveTokens,
+      fogTokens,
       gridSize,
       fogViewerOptions
     );
     ctx.globalCompositeOperation = 'destination-out';
     ctx.globalAlpha = 1.0;
 
-    for (const c of circles) {
+    // Cache visibility polygons per circle so step 3 and step 4 don't raycast twice for the same light source
+    const circlePolys = new Map<number, { x: number; y: number }[]>();
+
+    for (let idx = 0; idx < circles.length; idx++) {
+      const c = circles[idx];
       if (c.effectiveRadiusPx <= 0) continue;
 
       if (blockingWallsPx.length > 0) {
@@ -419,6 +511,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           c.effectiveRadiusPx,
           blockingWallsPx
         );
+        circlePolys.set(idx, poly);
         if (poly.length < 3) continue;
         ctx.save();
         ctx.beginPath();
@@ -460,17 +553,21 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       }
     }
 
-    // 4. Draw warm ambient torch/arcane light tint with Smooth Falloff where visible tokens or placed [Luz] emit light (also strictly clipped by walls/closed doors!)
+    // 4. Draw warm ambient torch/arcane light tint with Smooth Falloff
     ctx.globalCompositeOperation = 'source-over';
-    for (const c of circles) {
+    for (let idx = 0; idx < circles.length; idx++) {
+      const c = circles[idx];
       if (c.lightRadiusPx <= 0) continue;
       if (blockingWallsPx.length > 0) {
-        const lightPoly = computeVisibilityPolygon(
-          c.xPx,
-          c.yPx,
-          c.lightRadiusPx,
-          blockingWallsPx
-        );
+        const lightPoly =
+          c.lightRadiusPx === c.effectiveRadiusPx && circlePolys.has(idx)
+            ? circlePolys.get(idx)!
+            : computeVisibilityPolygon(
+                c.xPx,
+                c.yPx,
+                c.lightRadiusPx,
+                blockingWallsPx
+              );
         if (lightPoly.length < 3) continue;
         ctx.save();
         ctx.beginPath();
@@ -508,7 +605,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
     ctx.restore();
   }, [
-    effectiveTokens,
+    fogTokens,
     scene.nevoaAtiva,
     scene.nevoaAreasManuais,
     sheets,
@@ -700,7 +797,6 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         rafMoveRef.current = requestAnimationFrame(() => {
           rafMoveRef.current = null;
           setLiveDragPos((prev) => {
-            const baseMem = prev?.memoriaExplorada ?? token.memoriaExplorada;
             const prevPos = prev ? { x: prev.x, y: prev.y } : { x: token.x, y: token.y };
 
             // Resolve wall and closed-door collision!
@@ -723,19 +819,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               setWallCollisionFlash(false);
             }
 
-            const nextMem = recordTokenFogMemoryPath(
-              baseMem,
-              {
-                ...token,
-                x: resolved.x,
-                y: resolved.y,
-              },
-              prevPos
-            );
-
-            // Throttled lightweight WebSocket broadcast every 50ms
+            // Throttled lightweight WebSocket broadcast every 60ms
             const now = performance.now();
-            if (now - lastLiveBroadcastRef.current > 50) {
+            if (now - lastLiveBroadcastRef.current > 60) {
               lastLiveBroadcastRef.current = now;
               onMoveToken(
                 draggingTokenId,
@@ -745,11 +831,18 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               );
             }
 
+            if (
+              prev &&
+              Math.abs(prev.x - resolved.x) < 0.002 &&
+              Math.abs(prev.y - resolved.y) < 0.002
+            ) {
+              return prev;
+            }
+
             return {
               tokenId: draggingTokenId,
               x: resolved.x,
               y: resolved.y,
-              memoriaExplorada: nextMem,
             };
           });
         });
@@ -818,8 +911,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       const finalX = resolvedFinal.x;
       const finalY = resolvedFinal.y;
 
-      if (origToken && !origToken.ehFonteDeLuz && liveDragPos.memoriaExplorada) {
-        const finalMem = recordTokenFogMemoryStep(liveDragPos.memoriaExplorada, {
+      if (origToken && !origToken.ehFonteDeLuz) {
+        const pathMem = recordTokenFogMemoryPath(
+          origToken.memoriaExplorada,
+          {
+            ...origToken,
+            x: finalX,
+            y: finalY,
+          },
+          { x: origToken.x, y: origToken.y }
+        );
+        const finalMem = recordTokenFogMemoryStep(pathMem, {
           ...origToken,
           x: finalX,
           y: finalY,
@@ -1262,26 +1364,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
         {/* Interactive Tokens Layer — Hides tokens outside the Player's OWN token illumination (Only GM sees everything!) */}
         {effectiveTokens.map((token) => {
-          const insidePlayerFog = isTokenInsideFog(
-            token,
-            effectiveTokens,
-            sheets,
-            scene.nevoaAtiva,
-            gridSize,
-            fogViewerOptions
-          );
-
-          const insideGlobalFogForGmBadge = isTokenInsideFog(
-            token,
-            effectiveTokens,
-            sheets,
-            scene.nevoaAtiva,
-            gridSize,
-            {
-              paredes: scene.paredes,
-              colisaoParedesAtiva: Boolean(scene.colisaoParedesAtiva),
-            }
-          );
+          const fogVis = tokenFogVisibilityMap.get(token.id);
+          const insidePlayerFog = fogVis?.insidePlayerFog ?? false;
+          const insideGlobalFogForGmBadge = fogVis?.insideGlobalFogForGmBadge ?? false;
 
           // If the user is a Player ('jogador') and the token is outside their OWN token's illumination, hide it!
           if (userRole === 'jogador' && insidePlayerFog) {
@@ -1333,11 +1418,12 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                   }
                 }}
                 style={{
-                  left: `${token.x * gridSize}px`,
-                  top: `${token.y * gridSize}px`,
+                  left: 0,
+                  top: 0,
+                  transform: `translate3d(${token.x * gridSize}px, ${token.y * gridSize}px, 0)`,
                   width: `${token.larguraQuadrados * gridSize}px`,
                   height: `${token.alturaQuadrados * gridSize}px`,
-                  willChange: draggingTokenId === token.id ? 'left, top' : undefined,
+                  willChange: 'transform',
                 }}
                 className="absolute z-30 group cursor-pointer active:cursor-grabbing flex items-center justify-center"
                 role="button"
@@ -1439,7 +1525,6 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                     tokenId: token.id,
                     x: token.x,
                     y: token.y,
-                    memoriaExplorada: recordTokenFogMemoryStep(token.memoriaExplorada, token),
                   });
                 }
               }}
@@ -1453,11 +1538,12 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 }
               }}
               style={{
-                left: `${token.x * gridSize}px`,
-                top: `${token.y * gridSize}px`,
+                left: 0,
+                top: 0,
+                transform: `translate3d(${token.x * gridSize}px, ${token.y * gridSize}px, 0)`,
                 width: `${token.larguraQuadrados * gridSize}px`,
                 height: `${token.alturaQuadrados * gridSize}px`,
-                willChange: draggingTokenId === token.id ? 'left, top' : undefined,
+                willChange: 'transform',
               }}
               className={`absolute z-30 group cursor-grab active:cursor-grabbing ${
                 activeTool === 'wall' ||
@@ -1631,14 +1717,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           )) &&
         (userRole === 'mestre' ||
           selectedToken.ehFonteDeLuz ||
-          !isTokenInsideFog(
-            selectedToken,
-            effectiveTokens,
-            sheets,
-            scene.nevoaAtiva,
-            gridSize,
-            fogViewerOptions
-          )) && (
+          !(tokenFogVisibilityMap.get(selectedToken.id)?.insidePlayerFog ?? false)) && (
           <div
             className="fixed top-3 left-1/2 -translate-x-1/2 lg:left-[284px] lg:right-[456px] lg:translate-x-0 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 text-xs text-zinc-100 max-w-[92vw] w-fit mx-auto"
             role="toolbar"

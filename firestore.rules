@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function hasValidOwnerField() {
+      return request.resource.data.ownerId is string &&
+             request.resource.data.ownerId == request.auth.uid;
+    }
+
+    function isExistingOwner() {
+      return isSignedIn() &&
+             resource != null &&
+             resource.data.ownerId == request.auth.uid;
+    }
+
+    // ===============================================================
+    // User Profiles & Personal Rooms (/users/{userId})
+    // ===============================================================
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && hasValidOwnerField();
+      allow update: if isOwner(userId) &&
+                    hasValidOwnerField() &&
+                    request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isOwner(userId);
+    }
+
+    // ===============================================================
+    // User Private Notes & Folders (/userNotes/{userId})
+    // Strictly private: only the authenticated owner can read or write
+    // ===============================================================
+    match /userNotes/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && hasValidOwnerField();
+      allow update: if isOwner(userId) &&
+                    hasValidOwnerField() &&
+                    request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isOwner(userId);
+    }
+
+    // ===============================================================
+    // VTT Campaigns / Rooms (/campaigns/{roomCode})
+    // Authenticated users can read/sync room state; owner or room
+    // participants can update tactical state while preserving ownerId
+    // ===============================================================
+    match /campaigns/{roomCode} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && hasValidOwnerField();
+      allow update: if isSignedIn() &&
+                    (!('ownerId' in resource.data) ||
+                     request.resource.data.ownerId == resource.data.ownerId);
+      allow delete: if isExistingOwner();
+    }
+
+    // Default deny for all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

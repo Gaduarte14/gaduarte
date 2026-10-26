@@ -47,6 +47,19 @@ import {
   type QuestPortalNote,
 } from '../utils/questPortalNotesEngine.ts';
 
+import {
+  auth,
+  db,
+  doc,
+  onAuthStateChanged,
+  onSnapshot,
+  setDoc,
+  OperationType,
+  handleFirestoreError,
+  sanitizeForFirestore,
+  type FirebaseUser,
+} from '../firebase.ts';
+
 export interface QuestPortalNotesModuleProps {
   /** Identificador único do dono (sessão + usuário) garantindo isolamento estrito por criador */
   criadorId?: string;
@@ -77,8 +90,9 @@ export interface QuestPortalNotesModuleProps {
   onClose?: () => void;
 }
 
-const NOTES_STORAGE_PREFIX = 'vtt_private_quest_notes_v2_';
-const FOLDERS_STORAGE_PREFIX = 'vtt_private_quest_folders_v2_';
+// Cache em memória por dono para resposta instantânea a 60fps enquanto o Firestore sincroniza via onSnapshot
+const memoryNotesCache = new Map<string, QuestPortalNote[]>();
+const memoryFoldersCache = new Map<string, QuestPortalFolder[]>();
 
 export const QuestPortalNotesModule: React.FC<QuestPortalNotesModuleProps> = ({
   criadorId,
@@ -94,27 +108,30 @@ export const QuestPortalNotesModule: React.FC<QuestPortalNotesModuleProps> = ({
   compactSidebarMode = false,
   onClose,
 }) => {
-  // Chave estritamente particular do usuário que criou as notas
-  const effectiveOwnerId = useMemo(
-    () => criadorId || buildPrivateOwnerKey(personagemId, nomeCriador),
-    [criadorId, personagemId, nomeCriador]
-  );
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(() => auth.currentUser);
+  const isRemoteSnapshotRef = React.useRef<boolean>(false);
 
-  const notesStorageKey = `${NOTES_STORAGE_PREFIX}${effectiveOwnerId}`;
-  const foldersStorageKey = `${FOLDERS_STORAGE_PREFIX}${effectiveOwnerId}`;
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      setFirebaseUser(u);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  // Chave estritamente particular do usuário que criou as notas (prioriza UID do Firebase Auth quando logado)
+  const effectiveOwnerId = useMemo(
+    () =>
+      firebaseUser?.uid ||
+      criadorId ||
+      buildPrivateOwnerKey(personagemId, nomeCriador),
+    [firebaseUser?.uid, criadorId, personagemId, nomeCriador]
+  );
 
   // Carrega pastas particulares do criador
   const [folders, setFolders] = useState<QuestPortalFolder[]>(() => {
-    try {
-      const saved = localStorage.getItem(foldersStorageKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return filterPrivateFoldersByCreator(parsed, effectiveOwnerId);
-        }
-      }
-    } catch {
-      // Ignora erro de storage
+    const cached = memoryFoldersCache.get(effectiveOwnerId);
+    if (cached && cached.length > 0) {
+      return filterPrivateFoldersByCreator(cached, effectiveOwnerId);
     }
     return createDefaultQuestPortalFolders(effectiveOwnerId);
   });
@@ -124,16 +141,9 @@ export const QuestPortalNotesModule: React.FC<QuestPortalNotesModuleProps> = ({
     if (initialNotes && initialNotes.length > 0) {
       return filterPrivateNotesByCreator(initialNotes, effectiveOwnerId);
     }
-    try {
-      const saved = localStorage.getItem(notesStorageKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return filterPrivateNotesByCreator(parsed, effectiveOwnerId);
-        }
-      }
-    } catch {
-      // Ignora erro de storage
+    const cached = memoryNotesCache.get(effectiveOwnerId);
+    if (cached && cached.length > 0) {
+      return filterPrivateNotesByCreator(cached, effectiveOwnerId);
     }
     return createDefaultQuestPortalNotes(
       nomePersonagem,
@@ -143,79 +153,108 @@ export const QuestPortalNotesModule: React.FC<QuestPortalNotesModuleProps> = ({
     );
   });
 
-  // Recarrega quando o criador muda (ex: trocou de perfil/usuário), mantendo isolamento total
+  // Recarrega quando o criador muda e assina em tempo real no Firestore (onSnapshot)
   useEffect(() => {
-    try {
-      const savedFolders = localStorage.getItem(foldersStorageKey);
-      if (savedFolders) {
-        const parsedF = JSON.parse(savedFolders);
-        if (Array.isArray(parsedF)) {
-          setFolders(filterPrivateFoldersByCreator(parsedF, effectiveOwnerId));
-        } else {
-          setFolders(createDefaultQuestPortalFolders(effectiveOwnerId));
-        }
-      } else {
-        setFolders(createDefaultQuestPortalFolders(effectiveOwnerId));
-      }
-    } catch {
+    const cachedFolders = memoryFoldersCache.get(effectiveOwnerId);
+    if (cachedFolders && cachedFolders.length > 0) {
+      setFolders(filterPrivateFoldersByCreator(cachedFolders, effectiveOwnerId));
+    } else {
       setFolders(createDefaultQuestPortalFolders(effectiveOwnerId));
     }
 
     if (initialNotes && initialNotes.length > 0) {
       setNotes(filterPrivateNotesByCreator(initialNotes, effectiveOwnerId));
-      return;
+    } else {
+      const cachedNotes = memoryNotesCache.get(effectiveOwnerId);
+      if (cachedNotes && cachedNotes.length > 0) {
+        setNotes(filterPrivateNotesByCreator(cachedNotes, effectiveOwnerId));
+      } else {
+        setNotes(
+          createDefaultQuestPortalNotes(
+            nomePersonagem,
+            classePersonagem,
+            nivelPersonagem,
+            effectiveOwnerId
+          )
+        );
+      }
     }
-    try {
-      const savedNotes = localStorage.getItem(notesStorageKey);
-      if (savedNotes) {
-        const parsedN = JSON.parse(savedNotes);
-        if (Array.isArray(parsedN) && parsedN.length > 0) {
-          const own = filterPrivateNotesByCreator(parsedN, effectiveOwnerId);
-          if (own.length > 0) {
-            setNotes(own);
-            return;
+
+    if (!firebaseUser) return;
+
+    const noteDocPath = `userNotes/${firebaseUser.uid}`;
+    const noteDocRef = doc(db, 'userNotes', firebaseUser.uid);
+
+    const unsub = onSnapshot(
+      noteDocRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        isRemoteSnapshotRef.current = true;
+        if (Array.isArray(data.folders)) {
+          const validFolders = filterPrivateFoldersByCreator(
+            data.folders as QuestPortalFolder[],
+            effectiveOwnerId
+          );
+          memoryFoldersCache.set(effectiveOwnerId, validFolders);
+          setFolders(validFolders);
+        }
+        if (Array.isArray(data.notes) && data.notes.length > 0) {
+          const validNotes = filterPrivateNotesByCreator(
+            data.notes as QuestPortalNote[],
+            effectiveOwnerId
+          );
+          if (validNotes.length > 0) {
+            memoryNotesCache.set(effectiveOwnerId, validNotes);
+            setNotes(validNotes);
           }
         }
+        window.setTimeout(() => {
+          isRemoteSnapshotRef.current = false;
+        }, 20);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, noteDocPath);
       }
-    } catch {
-      // Ignora
-    }
-    setNotes(
-      createDefaultQuestPortalNotes(
-        nomePersonagem,
-        classePersonagem,
-        nivelPersonagem,
-        effectiveOwnerId
-      )
     );
+
+    return () => unsub();
   }, [
     effectiveOwnerId,
-    foldersStorageKey,
-    notesStorageKey,
+    firebaseUser,
     nomePersonagem,
     classePersonagem,
     nivelPersonagem,
     initialNotes,
   ]);
 
-  // Salva pastas particulares apenas localmente para este criador
+  // Persiste pastas e notas particulares no Firestore em tempo real (setDoc)
   useEffect(() => {
-    try {
-      localStorage.setItem(foldersStorageKey, JSON.stringify(folders));
-    } catch {
-      // Ignora quota
-    }
-  }, [folders, foldersStorageKey]);
-
-  // Salva notas particulares apenas localmente para este criador
-  useEffect(() => {
-    try {
-      localStorage.setItem(notesStorageKey, JSON.stringify(notes));
-    } catch {
-      // Ignora quota
-    }
+    memoryFoldersCache.set(effectiveOwnerId, folders);
+    memoryNotesCache.set(effectiveOwnerId, notes);
     onChangeNotes?.(notes);
-  }, [notes, notesStorageKey, onChangeNotes]);
+
+    if (!firebaseUser || isRemoteSnapshotRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      const noteDocPath = `userNotes/${firebaseUser.uid}`;
+      const noteDocRef = doc(db, 'userNotes', firebaseUser.uid);
+      setDoc(
+        noteDocRef,
+        sanitizeForFirestore({
+          ownerId: firebaseUser.uid,
+          folders,
+          notes,
+          updatedAt: Date.now(),
+        }),
+        { merge: true }
+      ).catch((err) => {
+        handleFirestoreError(err, OperationType.WRITE, noteDocPath);
+      });
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [folders, notes, effectiveOwnerId, firebaseUser, onChangeNotes]);
 
   // Garante que apenas pastas e notas cujo criadorId pertence ao usuário atual sejam exibidas
   const privateFolders = useMemo(
