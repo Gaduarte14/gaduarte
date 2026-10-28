@@ -52,6 +52,12 @@ import {
   WallPencilToolOverlay,
   type WallDrawSubMode,
 } from './WallPencilToolOverlay.tsx';
+import {
+  LIVE_SEND_THROTTLE_MS,
+  canUserStartDraggingToken,
+  stepTokenInterpolation,
+  type LiveTokenDragPacket,
+} from '../utils/liveTokenSync.ts';
 
 export type ActiveMapTool =
   | 'hand'
@@ -69,7 +75,9 @@ interface TacticalMapCanvasProps {
   scene: MapScene;
   sheets: CharacterSheet[];
   userRole: 'mestre' | 'jogador';
+  currentMoverId?: string;
   activePlayingSheetId?: string | null;
+  remoteLiveDrags?: Record<string, LiveTokenDragPacket>;
   activeTool: ActiveMapTool;
   zoom: number;
   pan: { x: number; y: number };
@@ -79,7 +87,14 @@ interface TacticalMapCanvasProps {
   activeTurnTokenId?: string | null;
   activeTurnFichaId?: string | null;
   onSelectToken: (tokenId: string | null) => void;
-  onMoveToken: (tokenId: string, newX: number, newY: number, isLiveDrag?: boolean) => void;
+  onMoveToken: (
+    tokenId: string,
+    newX: number,
+    newY: number,
+    isLiveDrag?: boolean,
+    seq?: number
+  ) => void;
+  onCancelLiveTokenDrag?: (tokenId: string) => void;
   onUpdateToken: (updated: MapToken) => void;
   onDeleteToken: (tokenId: string) => void;
   onPlaceLightToken?: (gridX: number, gridY: number) => void;
@@ -109,7 +124,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   scene,
   sheets,
   userRole,
+  currentMoverId = 'local-user',
   activePlayingSheetId,
+  remoteLiveDrags = {},
   activeTool,
   zoom,
   pan,
@@ -120,6 +137,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   activeTurnFichaId,
   onSelectToken,
   onMoveToken,
+  onCancelLiveTokenDrag,
   onUpdateToken,
   onDeleteToken,
   onPlaceLightToken,
@@ -148,8 +166,21 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     y: number;
     memoriaExplorada?: ExploredFogCircle[];
   } | null>(null);
+  const dragOriginRef = useRef<{ tokenId: string; origX: number; origY: number } | null>(
+    null
+  );
+  const dragSeqRef = useRef<number>(0);
   const lastLiveBroadcastRef = useRef<number>(0);
   const [wallCollisionFlash, setWallCollisionFlash] = useState<boolean>(false);
+  const [conflictLockNotice, setConflictLockNotice] = useState<string>('');
+
+  // Smooth 60 FPS interpolation state for remote tokens being dragged by other players
+  const [interpolatedRemotePos, setInterpolatedRemotePos] = useState<
+    Record<string, { x: number; y: number; moverName: string }>
+  >({});
+  const remoteTargetsRef = useRef<
+    Record<string, { targetX: number; targetY: number; moverName: string }>
+  >({});
 
   // Wall / Door live drawing state (for GM)
   const [wallDraft, setWallDraft] = useState<{
@@ -270,19 +301,128 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     setActiveWallPencilStroke([]);
   };
 
-  // Combine scene tokens with 60fps liveDragPos so the dragged token sprite glides at native frame rate
-  const effectiveTokens = useMemo(() => {
-    if (!liveDragPos) return scene.tokens;
-    return scene.tokens.map((t) =>
-      t.id === liveDragPos.tokenId
-        ? {
-            ...t,
-            x: liveDragPos.x,
-            y: liveDragPos.y,
+  // Sync incoming remoteLiveDrags into remoteTargetsRef and run a 60fps requestAnimationFrame lerp loop
+  useEffect(() => {
+    const nextTargets: Record<
+      string,
+      { targetX: number; targetY: number; moverName: string }
+    > = {};
+    for (const [tokId, pkt] of Object.entries(remoteLiveDrags)) {
+      if (!pkt || !pkt.active) continue;
+      // Ignore echo if we are dragging this token ourselves
+      if (pkt.movedBy === currentMoverId || tokId === draggingTokenId) continue;
+      nextTargets[tokId] = {
+        targetX: pkt.x,
+        targetY: pkt.y,
+        moverName: pkt.moverName || 'Jogador',
+      };
+    }
+    remoteTargetsRef.current = nextTargets;
+
+    // Remove finished remote drags immediately from interpolated state
+    setInterpolatedRemotePos((prev) => {
+      let changed = false;
+      const copy = { ...prev };
+      for (const k of Object.keys(copy)) {
+        if (!nextTargets[k]) {
+          delete copy[k];
+          changed = true;
+        }
+      }
+      for (const [k, t] of Object.entries(nextTargets)) {
+        if (!copy[k]) {
+          const origTok = scene.tokens.find((tok) => tok.id === k);
+          copy[k] = {
+            x: origTok ? origTok.x : t.targetX,
+            y: origTok ? origTok.y : t.targetY,
+            moverName: t.moverName,
+          };
+          changed = true;
+        }
+      }
+      return changed ? copy : prev;
+    });
+  }, [remoteLiveDrags, currentMoverId, draggingTokenId, scene.tokens]);
+
+  useEffect(() => {
+    const activeKeys = Object.keys(remoteTargetsRef.current);
+    if (activeKeys.length === 0 && Object.keys(interpolatedRemotePos).length === 0) {
+      return;
+    }
+
+    let rafId: number | null = null;
+    const stepFrame = () => {
+      const targets = remoteTargetsRef.current;
+      const keys = Object.keys(targets);
+      if (keys.length === 0) return;
+
+      setInterpolatedRemotePos((prev) => {
+        let anyMoved = false;
+        const next = { ...prev };
+        for (const k of keys) {
+          const target = targets[k];
+          if (!target) continue;
+          const curr = next[k] || {
+            x: target.targetX,
+            y: target.targetY,
+            moverName: target.moverName,
+          };
+          const stepped = stepTokenInterpolation(
+            curr.x,
+            curr.y,
+            target.targetX,
+            target.targetY,
+            0.35,
+            0.003
+          );
+          if (
+            Math.abs(stepped.x - curr.x) > 0.0005 ||
+            Math.abs(stepped.y - curr.y) > 0.0005 ||
+            curr.moverName !== target.moverName
+          ) {
+            next[k] = {
+              x: stepped.x,
+              y: stepped.y,
+              moverName: target.moverName,
+            };
+            anyMoved = true;
           }
-        : t
-    );
-  }, [scene.tokens, liveDragPos]);
+        }
+        return anyMoved ? next : prev;
+      });
+
+      rafId = requestAnimationFrame(stepFrame);
+    };
+
+    rafId = requestAnimationFrame(stepFrame);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [remoteLiveDrags, interpolatedRemotePos]);
+
+  // Combine scene tokens with 60fps local liveDragPos AND 60fps interpolated remote drags
+  const effectiveTokens = useMemo(() => {
+    const hasRemote = Object.keys(interpolatedRemotePos).length > 0;
+    if (!liveDragPos && !hasRemote) return scene.tokens;
+    return scene.tokens.map((t) => {
+      if (liveDragPos && t.id === liveDragPos.tokenId) {
+        return {
+          ...t,
+          x: liveDragPos.x,
+          y: liveDragPos.y,
+        };
+      }
+      const remotePos = interpolatedRemotePos[t.id];
+      if (remotePos) {
+        return {
+          ...t,
+          x: remotePos.x,
+          y: remotePos.y,
+        };
+      }
+      return t;
+    });
+  }, [scene.tokens, liveDragPos, interpolatedRemotePos]);
 
   // Quantize dragged token position to 0.5-grid steps for heavy raycasting & fog-of-war calculations
   // so sub-pixel mouse movement never stalls the main thread at 60fps
@@ -290,24 +430,54 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const quantizedDragY = liveDragPos ? Math.round(liveDragPos.y * 2) / 2 : null;
   const quantizedDragTokenId = liveDragPos ? liveDragPos.tokenId : null;
 
+  const remoteQuantizedKey = useMemo(() => {
+    const entries = Object.entries(interpolatedRemotePos);
+    if (entries.length === 0) return '';
+    return entries
+      .map(
+        ([id, p]) =>
+          `${id}:${Math.round(p.x * 2) / 2},${Math.round(p.y * 2) / 2}`
+      )
+      .join('|');
+  }, [interpolatedRemotePos]);
+
   const fogTokens = useMemo(() => {
     if (
-      !quantizedDragTokenId ||
-      quantizedDragX === null ||
-      quantizedDragY === null
+      !quantizedDragTokenId &&
+      !remoteQuantizedKey
     ) {
       return scene.tokens;
     }
-    return scene.tokens.map((t) =>
-      t.id === quantizedDragTokenId
-        ? {
-            ...t,
-            x: quantizedDragX,
-            y: quantizedDragY,
-          }
-        : t
-    );
-  }, [scene.tokens, quantizedDragTokenId, quantizedDragX, quantizedDragY]);
+    return scene.tokens.map((t) => {
+      if (
+        quantizedDragTokenId &&
+        t.id === quantizedDragTokenId &&
+        quantizedDragX !== null &&
+        quantizedDragY !== null
+      ) {
+        return {
+          ...t,
+          x: quantizedDragX,
+          y: quantizedDragY,
+        };
+      }
+      const rem = interpolatedRemotePos[t.id];
+      if (rem) {
+        return {
+          ...t,
+          x: Math.round(rem.x * 2) / 2,
+          y: Math.round(rem.y * 2) / 2,
+        };
+      }
+      return t;
+    });
+  }, [
+    scene.tokens,
+    quantizedDragTokenId,
+    quantizedDragX,
+    quantizedDragY,
+    remoteQuantizedKey,
+  ]);
 
   const fogViewerOptions = useMemo(
     () => ({
@@ -819,15 +989,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               setWallCollisionFlash(false);
             }
 
-            // Throttled lightweight WebSocket broadcast every 60ms
+            // Send only { tokenId, x, y, seq } every ~45ms over the low-latency live channel
             const now = performance.now();
-            if (now - lastLiveBroadcastRef.current > 60) {
+            if (now - lastLiveBroadcastRef.current >= LIVE_SEND_THROTTLE_MS) {
               lastLiveBroadcastRef.current = now;
+              dragSeqRef.current += 1;
               onMoveToken(
                 draggingTokenId,
                 Math.round(resolved.x * 100) / 100,
                 Math.round(resolved.y * 100) / 100,
-                true
+                true,
+                dragSeqRef.current
               );
             }
 
@@ -878,6 +1050,87 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     }
   };
 
+  const startDraggingToken = (
+    e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
+    token: MapToken
+  ) => {
+    e.stopPropagation();
+    const activeRemote = remoteLiveDrags[token.id] || null;
+    const check = canUserStartDraggingToken(
+      token,
+      currentMoverId,
+      userRole,
+      activePlayingSheetId,
+      activeRemote,
+      Date.now()
+    );
+
+    if (
+      userRole === 'mestre' ||
+      token.ehFonteDeLuz ||
+      Boolean(activePlayingSheetId && token.fichaId === activePlayingSheetId)
+    ) {
+      onSelectToken(token.id);
+    }
+
+    if (!check.allowed) {
+      if (check.lockedBy) {
+        setConflictLockNotice(`🔒 ${token.nome} está sendo movido por ${check.lockedBy}`);
+        window.setTimeout(() => setConflictLockNotice(''), 2200);
+      }
+      return;
+    }
+
+    if ('pointerId' in e && typeof e.currentTarget.setPointerCapture === 'function') {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore synthetic events without active pointerId
+      }
+    }
+
+    const coords = clientToMapCoords(e.clientX, e.clientY);
+    dragOriginRef.current = {
+      tokenId: token.id,
+      origX: token.x,
+      origY: token.y,
+    };
+    dragSeqRef.current = 1;
+    lastLiveBroadcastRef.current = performance.now();
+    setDraggingTokenId(token.id);
+    setDragOffsetGrid({
+      dx: coords.x / gridSize - token.x,
+      dy: coords.y / gridSize - token.y,
+    });
+    setLiveDragPos({
+      tokenId: token.id,
+      x: token.x,
+      y: token.y,
+    });
+    // Send initial live drag packet immediately (seq = 1) so other players see the drag start right away
+    onMoveToken(
+      token.id,
+      Math.round(token.x * 100) / 100,
+      Math.round(token.y * 100) / 100,
+      true,
+      1
+    );
+  };
+
+  const cancelDragIfActive = () => {
+    if (rafMoveRef.current !== null) {
+      cancelAnimationFrame(rafMoveRef.current);
+      rafMoveRef.current = null;
+    }
+    if (draggingTokenId) {
+      onCancelLiveTokenDrag?.(draggingTokenId);
+    }
+    dragOriginRef.current = null;
+    setDraggingTokenId(null);
+    setLiveDragPos(null);
+    setWallCollisionFlash(false);
+  };
+
   const finishDragIfActive = () => {
     if (rafMoveRef.current !== null) {
       cancelAnimationFrame(rafMoveRef.current);
@@ -911,6 +1164,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       const finalX = resolvedFinal.x;
       const finalY = resolvedFinal.y;
 
+      dragSeqRef.current += 1;
+      // Always flush the final position and persist to Firestore on release
+      onMoveToken(draggingTokenId, finalX, finalY, false, dragSeqRef.current);
+
       if (origToken && !origToken.ehFonteDeLuz) {
         const pathMem = recordTokenFogMemoryPath(
           origToken.memoriaExplorada,
@@ -932,10 +1189,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           y: finalY,
           memoriaExplorada: finalMem,
         });
-      } else {
-        onMoveToken(draggingTokenId, finalX, finalY, false);
       }
     }
+    dragOriginRef.current = null;
     setDraggingTokenId(null);
     setLiveDragPos(null);
     setWallCollisionFlash(false);
@@ -1011,15 +1267,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   return (
     <div
       ref={containerRef}
-      onMouseDown={handleMouseDownCanvas}
-      onMouseMove={handleMouseMoveCanvas}
-      onMouseUp={handleMouseUpCanvas}
+      onPointerDown={handleMouseDownCanvas}
+      onPointerMove={handleMouseMoveCanvas}
+      onPointerUp={handleMouseUpCanvas}
+      onPointerCancel={cancelDragIfActive}
       onMouseLeave={handleMouseUpCanvas}
       onWheel={handleWheelCanvas}
       data-testid="tactical-map-viewport"
       data-map-surface="true"
-      className="fixed inset-0 bg-[#191a21] overflow-hidden select-none"
+      className="fixed inset-0 bg-[#191a21] overflow-hidden select-none touch-none"
       style={{
+        touchAction: 'none',
         cursor:
           draggingTokenId
             ? 'grabbing'
@@ -1400,23 +1658,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               <div
                 key={token.id}
                 data-testid={`light-token-${token.id}`}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  onSelectToken(token.id);
-                  if (!token.bloqueado) {
-                    const coords = clientToMapCoords(e.clientX, e.clientY);
-                    setDraggingTokenId(token.id);
-                    setDragOffsetGrid({
-                      dx: coords.x / gridSize - token.x,
-                      dy: coords.y / gridSize - token.y,
-                    });
-                    setLiveDragPos({
-                      tokenId: token.id,
-                      x: token.x,
-                      y: token.y,
-                    });
-                  }
-                }}
+                onPointerDown={(e) => startDraggingToken(e, token)}
                 style={{
                   left: 0,
                   top: 0,
@@ -1425,7 +1667,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                   height: `${token.alturaQuadrados * gridSize}px`,
                   willChange: 'transform',
                 }}
-                className="absolute z-30 group cursor-pointer active:cursor-grabbing flex items-center justify-center"
+                className="absolute z-30 group cursor-pointer active:cursor-grabbing flex items-center justify-center touch-none"
                 role="button"
                 tabIndex={0}
                 title={`Luz (${token.luzQuadrados}q) — Clique para selecionar, aumentar ou diminuir`}
@@ -1447,7 +1689,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 {/* Floating On-Map +/- Light Radius Controls when this invisible Light is selected */}
                 {isSelected && (
                   <div
-                    onMouseDown={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
                     data-testid="selected-light-floating-controls"
                     className="absolute -top-11 left-1/2 -translate-x-1/2 z-50 bg-[#181922]/95 border border-amber-500/70 rounded-xl px-2 py-1 shadow-2xl flex items-center gap-1.5 whitespace-nowrap"
                   >
@@ -1502,32 +1744,13 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             );
           }
 
+          const remoteMover = interpolatedRemotePos[token.id]?.moverName;
+
           return (
             <div
               key={token.id}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                const isOwnPlayerToken =
-                  userRole === 'mestre' ||
-                  token.ehFonteDeLuz ||
-                  Boolean(activePlayingSheetId && token.fichaId === activePlayingSheetId);
-                if (isOwnPlayerToken) {
-                  onSelectToken(token.id);
-                }
-                if (!token.bloqueado && isOwnPlayerToken) {
-                  const coords = clientToMapCoords(e.clientX, e.clientY);
-                  setDraggingTokenId(token.id);
-                  setDragOffsetGrid({
-                    dx: coords.x / gridSize - token.x,
-                    dy: coords.y / gridSize - token.y,
-                  });
-                  setLiveDragPos({
-                    tokenId: token.id,
-                    x: token.x,
-                    y: token.y,
-                  });
-                }
-              }}
+              data-testid={`map-token-${token.id}`}
+              onPointerDown={(e) => startDraggingToken(e, token)}
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 if (
@@ -1545,7 +1768,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 height: `${token.alturaQuadrados * gridSize}px`,
                 willChange: 'transform',
               }}
-              className={`absolute z-30 group cursor-grab active:cursor-grabbing ${
+              className={`absolute z-30 group cursor-grab active:cursor-grabbing touch-none ${
                 activeTool === 'wall' ||
                 activeTool === 'door' ||
                 activeTool === 'draw' ||
@@ -1554,6 +1777,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                   : ''
               } ${
                 isSelected ? 'ring-3 ring-violet-400 rounded-full shadow-2xl' : ''
+              } ${
+                remoteMover ? 'ring-3 ring-sky-400 rounded-full shadow-xl' : ''
               } ${isTurnToken ? 'ring-3 ring-amber-400 rounded-full' : ''} ${
                 insideGlobalFogForGmBadge && userRole === 'mestre'
                   ? 'opacity-75 ring-2 ring-amber-500/80 rounded-full'
@@ -1563,6 +1788,15 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               tabIndex={0}
               aria-label={`Token ${token.nome} em (${Math.round(token.x)}, ${Math.round(token.y)})`}
             >
+              {/* Live Remote Dragging Badge when another player is moving this token */}
+              {remoteMover && (
+                <div
+                  data-testid={`remote-dragging-badge-${token.id}`}
+                  className="absolute -top-10 left-1/2 -translate-x-1/2 z-50 px-2 py-0.5 rounded-full bg-sky-950/95 border border-sky-400 text-[9px] font-mono font-bold text-sky-200 whitespace-nowrap pointer-events-none shadow-lg"
+                >
+                  ↔ {remoteMover}
+                </div>
+              )}
               {/* Small Lightbulb Emoji (💡) Above Token When It Is This Token's Turn in Initiative */}
               {isTurnToken && (
                 <div
@@ -1656,6 +1890,16 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           );
         })}
       </div>
+
+      {/* Simultaneous Token Drag Conflict Lock Notice */}
+      {conflictLockNotice && (
+        <div
+          data-testid="token-conflict-lock-banner"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-40 bg-rose-950/95 border border-rose-400/80 text-rose-200 px-4 py-1.5 rounded-full text-xs font-semibold shadow-2xl flex items-center gap-2 pointer-events-none"
+        >
+          <span>{conflictLockNotice}</span>
+        </div>
+      )}
 
       {/* Active Light Placement Tool Banner */}
       {activeTool === 'light' && (

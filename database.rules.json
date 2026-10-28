@@ -1,0 +1,15 @@
+{
+  "rules": {
+    "live": {
+      "$roomCode": {
+        "$sceneId": {
+          ".read": "auth != null",
+          "$tokenId": {
+            ".write": "auth != null && (!newData.exists() || (newData.child('movedBy').val() === auth.uid && (!data.exists() || data.child('movedBy').val() === auth.uid || newData.child('role').val() === 'mestre' || (now - data.child('ts').val()) > 4000)))",
+            ".validate": "newData.hasChildren(['tokenId', 'sceneId', 'x', 'y', 'movedBy', 'seq', 'ts', 'active']) && newData.child('x').isNumber() && newData.child('y').isNumber() && newData.child('seq').isNumber() && newData.child('ts').isNumber()"
+          }
+        }
+      }
+    }
+  }
+}

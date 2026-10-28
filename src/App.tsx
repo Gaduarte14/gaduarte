@@ -46,8 +46,17 @@ import {
   OperationType,
   handleFirestoreError,
   sanitizeForFirestore,
+  publishLiveTokenDrag,
+  clearLiveTokenDrag,
+  subscribeToRoomLiveTokens,
   type FirebaseUser,
 } from './firebase.ts';
+import {
+  shouldAcceptRemoteLivePacket,
+  STALE_DRAG_TIMEOUT_MS,
+  type LiveTokenDragPacket,
+  type AcceptedPacketMeta,
+} from './utils/liveTokenSync.ts';
 import { INITIAL_CAMPAIGN_STATE } from './data/initialCampaign.ts';
 import type {
   AssetFolder,
@@ -201,6 +210,15 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const bcRef = useRef<BroadcastChannel | null>(null);
   const isRemoteUpdateRef = useRef<boolean>(false);
+
+  // Ephemeral Live Token Drag State (received from Firebase RTDB / BroadcastChannel / WS)
+  const [remoteLiveDrags, setRemoteLiveDrags] = useState<Record<string, LiveTokenDragPacket>>({});
+  const lastAcceptedPacketRef = useRef<Record<string, AcceptedPacketMeta>>({});
+  const currentlyDraggingTokenIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string>(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const activeScene: MapScene =
     campaign.cenas.find((c) => c.id === campaign.cenaAtivaId) || campaign.cenas[0];
@@ -499,12 +517,80 @@ export default function App() {
     }
   };
 
+  // Process incoming ephemeral live token drag packet (validates echo, sequence, and staleness)
+  const handleIncomingLivePacket = useCallback((packet: LiveTokenDragPacket) => {
+    const myMoverId = sessionIdRef.current;
+    const myDraggingTokenId = currentlyDraggingTokenIdRef.current;
+    const lastAccepted = lastAcceptedPacketRef.current[packet.tokenId] || null;
+
+    if (!shouldAcceptRemoteLivePacket(packet, myMoverId, myDraggingTokenId, lastAccepted)) {
+      return;
+    }
+
+    lastAcceptedPacketRef.current[packet.tokenId] = {
+      movedBy: packet.movedBy,
+      seq: packet.seq,
+      ts: packet.ts,
+    };
+
+    setRemoteLiveDrags((prev) => ({
+      ...prev,
+      [packet.tokenId]: packet,
+    }));
+  }, []);
+
+  const handleRemoteTokenDragCleared = useCallback((tokenId: string) => {
+    setRemoteLiveDrags((prev) => {
+      if (!(tokenId in prev)) return prev;
+      const next = { ...prev };
+      delete next[tokenId];
+      return next;
+    });
+  }, []);
+
+  // Subscribe to Firebase Realtime Database (/live/{roomCode}/{sceneId}) + prune stale drags
+  useEffect(() => {
+    if (!campaign.codigoSala || !activeScene.id) return;
+    setRemoteLiveDrags({});
+    const unsubRtdb = subscribeToRoomLiveTokens(
+      campaign.codigoSala,
+      activeScene.id,
+      handleIncomingLivePacket,
+      handleRemoteTokenDragCleared
+    );
+
+    const pruneTimer = window.setInterval(() => {
+      const now = Date.now();
+      setRemoteLiveDrags((prev) => {
+        let changed = false;
+        const next: Record<string, LiveTokenDragPacket> = {};
+        for (const [tokenId, pkt] of Object.entries(prev)) {
+          if (now - pkt.ts <= STALE_DRAG_TIMEOUT_MS) {
+            next[tokenId] = pkt;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+
+    return () => {
+      unsubRtdb();
+      window.clearInterval(pruneTimer);
+    };
+  }, [campaign.codigoSala, activeScene.id, handleIncomingLivePacket, handleRemoteTokenDragCleared]);
+
   // Connect to Real-Time WebSocket + BroadcastChannel
   useEffect(() => {
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel('owlbear_quest_vtt_channel');
       bc.onmessage = (ev) => {
-        if (ev.data?.type === 'campaign:state' && ev.data.payload) {
+        if (ev.data?.type === 'token:live_drag' && ev.data.payload) {
+          handleIncomingLivePacket(ev.data.payload as LiveTokenDragPacket);
+        } else if (ev.data?.type === 'token:live_clear' && ev.data.payload?.tokenId) {
+          handleRemoteTokenDragCleared(ev.data.payload.tokenId);
+        } else if (ev.data?.type === 'campaign:state' && ev.data.payload) {
           isRemoteUpdateRef.current = true;
           setCampaign(ev.data.payload);
           isRemoteUpdateRef.current = false;
@@ -552,7 +638,11 @@ export default function App() {
         ws.onmessage = (event) => {
           try {
             const msg = JSON.parse(event.data);
-            if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
+            if (msg.type === 'token:live_drag' && msg.payload) {
+              handleIncomingLivePacket(msg.payload as LiveTokenDragPacket);
+            } else if (msg.type === 'token:live_clear' && msg.payload?.tokenId) {
+              handleRemoteTokenDragCleared(msg.payload.tokenId);
+            } else if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
               if (msg.payload) {
                 isRemoteUpdateRef.current = true;
                 const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
@@ -577,6 +667,7 @@ export default function App() {
               }
             } else if (msg.type === 'token:moved' && msg.payload) {
               const { sceneId, tokenId, x, y } = msg.payload;
+              handleRemoteTokenDragCleared(tokenId);
               isRemoteUpdateRef.current = true;
               setCampaign((prev) => ({
                 ...prev,
@@ -614,26 +705,89 @@ export default function App() {
       ws?.close();
       bcRef.current?.close();
     };
-  }, []);
+  }, [handleIncomingLivePacket, handleRemoteTokenDragCleared]);
 
-  // Zero-lag Token Movement Handler: skips localStorage serialization during live 60fps drag!
+  // Cancel / cleanup live token drag on pointercancel or mid-drag abort
+  const handleCancelLiveTokenDrag = useCallback(
+    (tokenId: string) => {
+      if (currentlyDraggingTokenIdRef.current === tokenId) {
+        currentlyDraggingTokenIdRef.current = null;
+      }
+      clearLiveTokenDrag(campaign.codigoSala, activeScene.id, tokenId);
+      if (bcRef.current) {
+        bcRef.current.postMessage({
+          type: 'token:live_clear',
+          payload: { sceneId: activeScene.id, tokenId },
+        });
+      }
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'token:live_clear',
+            payload: { sceneId: activeScene.id, tokenId },
+          })
+        );
+      }
+    },
+    [campaign.codigoSala, activeScene.id]
+  );
+
+  // Two-Path Real-Time Token Movement Handler:
+  // 1. Live Drag (isLiveDrag === true): sends 164-byte packet via Firebase RTDB + BroadcastChannel + WS (~45ms throttle), 0 Firestore writes.
+  // 2. Final Drop (isLiveDrag === false): clears ephemeral live node and commits final position to Firestore.
   const handleMoveToken = (
     tokenId: string,
     newX: number,
     newY: number,
-    isLiveDrag?: boolean
+    isLiveDrag?: boolean,
+    seq?: number
   ) => {
     if (isLiveDrag) {
-      // Lightweight WebSocket broadcast only during active mouse drag
+      currentlyDraggingTokenIdRef.current = tokenId;
+      const packet: LiveTokenDragPacket = {
+        tokenId,
+        sceneId: activeScene.id,
+        x: Math.round(newX * 1000) / 1000,
+        y: Math.round(newY * 1000) / 1000,
+        movedBy: sessionId,
+        moverName: userName,
+        role: userRole,
+        seq: seq ?? Date.now(),
+        ts: Date.now(),
+        active: true,
+      };
+
+      // 1. Firebase Realtime Database (/live/{roomCode}/{sceneId}/{tokenId})
+      publishLiveTokenDrag(campaign.codigoSala, packet);
+
+      // 2. BroadcastChannel (instant cross-tab sync in same browser)
+      if (bcRef.current) {
+        bcRef.current.postMessage({ type: 'token:live_drag', payload: packet });
+      }
+
+      // 3. WebSocket (instant LAN/server sync)
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'token:move',
-            payload: { sceneId: activeScene.id, tokenId, x: newX, y: newY },
-          })
-        );
+        wsRef.current.send(JSON.stringify({ type: 'token:live_drag', payload: packet }));
       }
       return;
+    }
+
+    // Final release (pointerup): clear ephemeral live drag channel first
+    currentlyDraggingTokenIdRef.current = null;
+    clearLiveTokenDrag(campaign.codigoSala, activeScene.id, tokenId);
+    if (bcRef.current) {
+      bcRef.current.postMessage({
+        type: 'token:live_clear',
+        payload: { sceneId: activeScene.id, tokenId },
+      });
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'token:live_clear',
+          payload: { sceneId: activeScene.id, tokenId },
+        })
+      );
     }
 
     setCampaign((prev) => {
@@ -1232,6 +1386,7 @@ export default function App() {
         scene={activeScene}
         sheets={campaign.fichas}
         userRole={userRole}
+        currentMoverId={sessionId}
         activePlayingSheetId={activePlayingSheetId}
         activeTool={activeMapTool}
         zoom={zoom}
@@ -1241,8 +1396,10 @@ export default function App() {
         selectedTokenId={selectedTokenId}
         activeTurnTokenId={activeTurnToken?.id || null}
         activeTurnFichaId={activeTurnParticipant?.fichaId || null}
+        remoteLiveDrags={remoteLiveDrags}
         onSelectToken={setSelectedTokenId}
         onMoveToken={handleMoveToken}
+        onCancelLiveTokenDrag={handleCancelLiveTokenDrag}
         onUpdateToken={handleUpdateToken}
         onDeleteToken={handleDeleteToken}
         onPlaceLightToken={(gridX, gridY) => {

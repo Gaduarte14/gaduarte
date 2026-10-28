@@ -16,10 +16,25 @@ import {
   onSnapshot,
   collection,
 } from 'firebase/firestore';
+import {
+  getDatabase,
+  ref,
+  set,
+  remove,
+  onChildAdded,
+  onChildChanged,
+  onChildRemoved,
+  onDisconnect,
+  type Database,
+} from 'firebase/database';
+import type { LiveTokenDragPacket } from './utils/liveTokenSync.ts';
 
 export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'AIzaSyAU9eSZY-2RBqXtOsRw4ulZbzHYXlA3D1s',
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'table-top-98973.firebaseapp.com',
+  databaseURL:
+    import.meta.env.VITE_FIREBASE_DATABASE_URL ||
+    'https://table-top-98973-default-rtdb.firebaseio.com',
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'table-top-98973',
   storageBucket:
     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'table-top-98973.firebasestorage.app',
@@ -33,6 +48,16 @@ export const firebaseConfig = {
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
+
+// Inicializa o Firebase Realtime Database (canal efêmero de baixa latência para arrasto de tokens)
+let rtdbInstance: Database | null = null;
+try {
+  rtdbInstance = getDatabase(app, firebaseConfig.databaseURL);
+} catch {
+  rtdbInstance = null;
+}
+export const rtdb = rtdbInstance;
+
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -124,6 +149,103 @@ export async function logoutFirebase(): Promise<void> {
   await signOut(auth);
 }
 
+// ============================================================================
+// CANAL AO VIVO DE BAIXA LATÊNCIA (Firebase Realtime Database: /live/{salaId}/{sceneId}/{tokenId})
+// Envia apenas ~160 bytes (tokenId + x + y + seq + ts) a cada ~45ms durante o arrasto
+// ============================================================================
+const registeredDisconnectKeys = new Set<string>();
+
+function sanitizeRoomKey(raw: string): string {
+  return (raw || 'default').replace(/[.#$[\]/]/g, '_');
+}
+
+export function publishLiveTokenDrag(
+  roomCode: string,
+  packet: LiveTokenDragPacket
+): void {
+  if (!rtdb || !roomCode || !packet.sceneId || !packet.tokenId) return;
+  const safeRoom = sanitizeRoomKey(roomCode);
+  const safeScene = sanitizeRoomKey(packet.sceneId);
+  const safeToken = sanitizeRoomKey(packet.tokenId);
+  const path = `live/${safeRoom}/${safeScene}/${safeToken}`;
+  const tokenRef = ref(rtdb, path);
+
+  // Registra limpeza automática no servidor (onDisconnect) no início do arrasto
+  if (!registeredDisconnectKeys.has(path)) {
+    registeredDisconnectKeys.add(path);
+    onDisconnect(tokenRef)
+      .remove()
+      .catch(() => {
+        registeredDisconnectKeys.delete(path);
+      });
+  }
+
+  set(tokenRef, packet).catch(() => {
+    // Falha silenciosa se o usuário ainda não ativou o Realtime Database no console
+  });
+}
+
+export function clearLiveTokenDrag(
+  roomCode: string,
+  sceneId: string,
+  tokenId: string
+): void {
+  if (!rtdb || !roomCode || !sceneId || !tokenId) return;
+  const safeRoom = sanitizeRoomKey(roomCode);
+  const safeScene = sanitizeRoomKey(sceneId);
+  const safeToken = sanitizeRoomKey(tokenId);
+  const path = `live/${safeRoom}/${safeScene}/${safeToken}`;
+  const tokenRef = ref(rtdb, path);
+
+  if (registeredDisconnectKeys.has(path)) {
+    registeredDisconnectKeys.delete(path);
+    onDisconnect(tokenRef)
+      .cancel()
+      .catch(() => {});
+  }
+
+  remove(tokenRef).catch(() => {});
+}
+
+export function subscribeToRoomLiveTokens(
+  roomCode: string,
+  sceneId: string,
+  onPacket: (packet: LiveTokenDragPacket) => void,
+  onRemoved: (tokenId: string) => void
+): () => void {
+  if (!rtdb || !roomCode || !sceneId) return () => {};
+  const safeRoom = sanitizeRoomKey(roomCode);
+  const safeScene = sanitizeRoomKey(sceneId);
+  const sceneLiveRef = ref(rtdb, `live/${safeRoom}/${safeScene}`);
+
+  const handleSnap = (snap: { val: () => unknown }) => {
+    const data = snap.val() as LiveTokenDragPacket | null;
+    if (data && data.tokenId && typeof data.x === 'number' && typeof data.y === 'number') {
+      onPacket(data);
+    }
+  };
+
+  const unsubAdd = onChildAdded(sceneLiveRef, handleSnap, () => {});
+  const unsubChange = onChildChanged(sceneLiveRef, handleSnap, () => {});
+  const unsubRemove = onChildRemoved(
+    sceneLiveRef,
+    (snap) => {
+      const data = snap.val() as LiveTokenDragPacket | null;
+      const removedTokenId = data?.tokenId || snap.key;
+      if (removedTokenId) {
+        onRemoved(removedTokenId);
+      }
+    },
+    () => {}
+  );
+
+  return () => {
+    unsubAdd();
+    unsubChange();
+    unsubRemove();
+  };
+}
+
 // Validate connection to Firestore non-destructively on boot
 async function verifyFirestoreConnection() {
   try {
@@ -147,6 +269,10 @@ export {
   setDoc,
   onSnapshot,
   collection,
+  ref,
+  set,
+  remove,
+  onDisconnect,
   onAuthStateChanged,
   signInWithPopup,
   signOut,

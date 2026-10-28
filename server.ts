@@ -127,6 +127,33 @@ async function startServer() {
             }
             break;
           }
+          case 'token:live_drag': {
+            const pkt = msg.payload;
+            if (pkt && pkt.tokenId && typeof pkt.x === 'number' && typeof pkt.y === 'number') {
+              const info = clientSessions.get(ws);
+              if (info) {
+                (info as { sessionId: string; userName: string; activeDrag?: { sceneId: string; tokenId: string } }).activeDrag = {
+                  sceneId: pkt.sceneId,
+                  tokenId: pkt.tokenId,
+                };
+              }
+              broadcast({ type: 'token:live_drag', payload: pkt }, ws);
+            }
+            break;
+          }
+          case 'token:live_clear': {
+            const { sceneId, tokenId } = msg.payload || {};
+            if (tokenId) {
+              const info = clientSessions.get(ws) as
+                | { sessionId: string; userName: string; activeDrag?: { sceneId: string; tokenId: string } }
+                | undefined;
+              if (info && info.activeDrag?.tokenId === tokenId) {
+                info.activeDrag = undefined;
+              }
+              broadcast({ type: 'token:live_clear', payload: { sceneId, tokenId } }, ws);
+            }
+            break;
+          }
           case 'token:move': {
             const { sceneId, tokenId, x, y } = msg.payload || {};
             const scene = serverCampaignState.cenas.find((c) => c.id === sceneId);
@@ -149,8 +176,19 @@ async function startServer() {
     });
 
     ws.on('close', () => {
-      const info = clientSessions.get(ws);
+      const info = clientSessions.get(ws) as
+        | { sessionId: string; userName: string; activeDrag?: { sceneId: string; tokenId: string } }
+        | undefined;
       clientSessions.delete(ws);
+      if (info?.activeDrag) {
+        broadcast({
+          type: 'token:live_clear',
+          payload: {
+            sceneId: info.activeDrag.sceneId,
+            tokenId: info.activeDrag.tokenId,
+          },
+        });
+      }
       if (info && serverCampaignState.mestreSessionId === info.sessionId) {
         // Check if another socket with the same sessionId is still open
         const stillConnected = Array.from(clientSessions.values()).some(
