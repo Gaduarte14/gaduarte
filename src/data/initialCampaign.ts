@@ -722,3 +722,286 @@ export const INITIAL_CAMPAIGN_STATE: CampaignState = {
   ],
 };
 
+const LEGACY_DEMO_SHEET_IDS = new Set([
+  'char-thorin',
+  'ficha-thorin',
+  'char-goblin-chefe',
+  'ficha-goblin',
+  'char-goblin',
+]);
+
+const LEGACY_DEMO_CHARACTER_NAMES = new Set([
+  'thorin escudo de ferro',
+  'thorin escudo-de-ferro',
+  'krag, chefe goblin',
+  'goblin batedor',
+]);
+
+const LEGACY_DEMO_TOKEN_IDS = new Set([
+  'tok-thorin',
+  'tok-brazier',
+  'tok-torch-1',
+  'tok-goblin-1',
+  'tok-goblin',
+  'tok-drake',
+  'tok-ogre',
+  'tok-chest',
+]);
+
+const LEGACY_DEMO_TOKEN_NAMES = new Set([
+  'thorin escudo de ferro',
+  'thorin escudo-de-ferro',
+  'braseiro ancestral',
+  'krag, chefe goblin',
+  'goblin batedor',
+  'draco guardião de cinzas',
+]);
+
+const LEGACY_DEMO_WALL_IDS = new Set([
+  'wall-nw-s',
+  'wall-nw-e',
+  'door-nw-e',
+  'wall-nw-e2',
+  'wall-center-w',
+  'door-center',
+  'wall-center-e',
+  'wall-1',
+  'wall-2',
+  'wall-3',
+  'wall-4',
+  'wall-5',
+  'wall-6',
+  'door-1',
+  'door-2',
+]);
+
+const LEGACY_DEMO_ASSET_IDS = new Set([
+  'asset-char-thorin',
+  'asset-char-goblin',
+  'asset-prop-chest',
+]);
+
+const LEGACY_DEMO_INIT_IDS = new Set([
+  'init-tok-thorin',
+  'init-tok-goblin',
+  'init-2',
+  'init-3',
+  'init-4',
+]);
+
+const LEGACY_DEMO_LOG_IDS = new Set([
+  'log-1',
+  'log-2',
+  'log-3',
+  'log-4',
+  'roll-init-1',
+  'roll-init-2',
+]);
+
+const LEGACY_DEMO_MUSIC_FOLDER_IDS = new Set([
+  'mfolder-2',
+  'mfolder-3',
+  'folder-2',
+]);
+
+const LEGACY_DEMO_MUSIC_TRACK_IDS = new Set([
+  'track-2',
+  'track-3',
+  'track-4',
+]);
+
+/**
+ * Automatically sanitizes any loaded, synced, or imported CampaignState by stripping legacy
+ * pre-cleanup demo items (such as Thorin Escudo de Ferro, Krag Chefe Goblin, Braseiro Ancestral,
+ * and the old hardcoded walls in `scene-crypt` that caused invisible wall collisions in Player mode),
+ * while preserving 100% of user-created sheets, tokens, walls, notes, and rolls.
+ */
+export function sanitizeLegacyCampaignState(raw: CampaignState): {
+  cleaned: CampaignState;
+  didChange: boolean;
+} {
+  if (!raw || typeof raw !== 'object') {
+    return { cleaned: INITIAL_CAMPAIGN_STATE, didChange: true };
+  }
+
+  let didChange = false;
+  let nextId = raw.id;
+  if (nextId === 'camp-owlbear-quest') {
+    nextId = 'camp-rollportal';
+    didChange = true;
+  }
+
+  let nextCodigoSala = raw.codigoSala;
+  if (nextCodigoSala === 'OWL-5E26') {
+    nextCodigoSala = 'RPT-5E26';
+    didChange = true;
+  }
+
+  // 1. Clean legacy demo character sheets
+  const rawFichas = Array.isArray(raw.fichas) ? raw.fichas : [];
+  let nextFichas = rawFichas.filter((f) => {
+    const nameNorm = (f.nomePersonagem || '').trim().toLowerCase();
+    const isLegacy =
+      LEGACY_DEMO_SHEET_IDS.has(f.id) || LEGACY_DEMO_CHARACTER_NAMES.has(nameNorm);
+    if (isLegacy) didChange = true;
+    return !isLegacy;
+  });
+  if (nextFichas.length === 0) {
+    nextFichas = [DEFAULT_SHEETS[0]];
+    didChange = true;
+  }
+
+  // 2. Clean legacy demo names from nomesCampanha
+  const rawNomes = Array.isArray(raw.nomesCampanha) ? raw.nomesCampanha : [];
+  let nextNomes = rawNomes.filter((n) => {
+    const isLegacy = LEGACY_DEMO_CHARACTER_NAMES.has((n || '').trim().toLowerCase());
+    if (isLegacy) didChange = true;
+    return !isLegacy;
+  });
+  if (nextNomes.length === 0) {
+    nextNomes = nextFichas.map((f) => f.nomePersonagem);
+    didChange = true;
+  }
+
+  // 3. Clean legacy demo tokens & invisible demo walls in scenes
+  const rawCenas = Array.isArray(raw.cenas) ? raw.cenas : [];
+  const nextCenas = rawCenas.map((scene) => {
+    let sceneChanged = false;
+    const rawWalls = Array.isArray(scene.paredes) ? scene.paredes : [];
+    const isDefaultCrypt = scene.id === 'scene-crypt' || scene.id === 'cena-1';
+
+    const filteredWalls = rawWalls.filter((w) => {
+      if (LEGACY_DEMO_WALL_IDS.has(w.id)) {
+        sceneChanged = true;
+        return false;
+      }
+      // In the default scene-crypt, any wall that was NOT created by the GM tools
+      // (which use timestamped IDs `parede-17...`, `porta-17...`, or `wall-pencil-...`) is a legacy seed wall
+      if (
+        isDefaultCrypt &&
+        !w.id.startsWith('parede-17') &&
+        !w.id.startsWith('porta-17') &&
+        !w.id.startsWith('wall-pencil-')
+      ) {
+        sceneChanged = true;
+        return false;
+      }
+      return true;
+    });
+
+    const rawTokens = Array.isArray(scene.tokens) ? scene.tokens : [];
+    const filteredTokens = rawTokens.filter((t) => {
+      const nameNorm = (t.nome || '').trim().toLowerCase();
+      const isLegacyTok =
+        LEGACY_DEMO_TOKEN_IDS.has(t.id) ||
+        (t.fichaId && LEGACY_DEMO_SHEET_IDS.has(t.fichaId)) ||
+        LEGACY_DEMO_TOKEN_NAMES.has(nameNorm);
+      if (isLegacyTok) {
+        sceneChanged = true;
+        return false;
+      }
+      return true;
+    });
+
+    if (!sceneChanged) return scene;
+    didChange = true;
+    return {
+      ...scene,
+      paredes: filteredWalls,
+      tokens: filteredTokens,
+    };
+  });
+
+  // 4. Clean legacy demo assets
+  const rawAssets = Array.isArray(raw.assets) ? raw.assets : [];
+  const nextAssets = rawAssets.filter((a) => {
+    const isLegacyAsset =
+      LEGACY_DEMO_ASSET_IDS.has(a.id) ||
+      (a.fichaPersonagemId && LEGACY_DEMO_SHEET_IDS.has(a.fichaPersonagemId));
+    if (isLegacyAsset) didChange = true;
+    return !isLegacyAsset;
+  });
+
+  // 5. Clean legacy demo initiative participants
+  const rawInit = raw.iniciativa || INITIAL_CAMPAIGN_STATE.iniciativa;
+  const rawParts = Array.isArray(rawInit.participantes) ? rawInit.participantes : [];
+  const nextParts = rawParts.filter((p) => {
+    const nameNorm = (p.nome || '').trim().toLowerCase();
+    const isLegacyPart =
+      LEGACY_DEMO_INIT_IDS.has(p.id) ||
+      (p.tokenId && LEGACY_DEMO_TOKEN_IDS.has(p.tokenId)) ||
+      (p.fichaId && LEGACY_DEMO_SHEET_IDS.has(p.fichaId)) ||
+      LEGACY_DEMO_CHARACTER_NAMES.has(nameNorm);
+    if (isLegacyPart) didChange = true;
+    return !isLegacyPart;
+  });
+
+  // 6. Clean legacy demo combat logs
+  const rawLogs = Array.isArray(raw.logsCombate) ? raw.logsCombate : [];
+  let nextLogs = rawLogs.filter((l) => {
+    const charNorm = (l.personagemNome || l.name || '').trim().toLowerCase();
+    const isLegacyLog =
+      LEGACY_DEMO_LOG_IDS.has(l.id) ||
+      (l.personagemId && LEGACY_DEMO_SHEET_IDS.has(l.personagemId)) ||
+      LEGACY_DEMO_CHARACTER_NAMES.has(charNorm);
+    if (isLegacyLog) didChange = true;
+    return !isLegacyLog;
+  });
+  if (nextLogs.length === 0) {
+    nextLogs = INITIAL_CAMPAIGN_STATE.logsCombate;
+    didChange = true;
+  }
+
+  // 7. Clean legacy extra demo music folders & tracks
+  const rawMusicFolders = Array.isArray(raw.pastasMusica) ? raw.pastasMusica : [];
+  let nextMusicFolders = rawMusicFolders.filter((mf) => {
+    const isLegacyFolder = LEGACY_DEMO_MUSIC_FOLDER_IDS.has(mf.id);
+    if (isLegacyFolder) didChange = true;
+    return !isLegacyFolder;
+  });
+  if (nextMusicFolders.length === 0) {
+    nextMusicFolders = INITIAL_CAMPAIGN_STATE.pastasMusica;
+    didChange = true;
+  }
+
+  const rawMusicTracks = Array.isArray(raw.faixasMusica) ? raw.faixasMusica : [];
+  let nextMusicTracks = rawMusicTracks.filter((mt) => {
+    const isLegacyTrack =
+      LEGACY_DEMO_MUSIC_TRACK_IDS.has(mt.id) ||
+      (mt.pastaId && LEGACY_DEMO_MUSIC_FOLDER_IDS.has(mt.pastaId));
+    if (isLegacyTrack) didChange = true;
+    return !isLegacyTrack;
+  });
+  if (nextMusicTracks.length === 0) {
+    nextMusicTracks = INITIAL_CAMPAIGN_STATE.faixasMusica;
+    didChange = true;
+  }
+
+  if (!didChange) {
+    return { cleaned: raw, didChange: false };
+  }
+
+  return {
+    cleaned: {
+      ...raw,
+      id: nextId,
+      codigoSala: nextCodigoSala,
+      fichas: nextFichas,
+      nomesCampanha: nextNomes,
+      cenas: nextCenas,
+      assets: nextAssets,
+      iniciativa: {
+        ...rawInit,
+        turnoIndice:
+          nextParts.length > 0 ? (rawInit.turnoIndice || 0) % nextParts.length : 0,
+        participantes: nextParts,
+      },
+      logsCombate: nextLogs,
+      pastasMusica: nextMusicFolders,
+      faixasMusica: nextMusicTracks,
+    },
+    didChange: true,
+  };
+}
+
+

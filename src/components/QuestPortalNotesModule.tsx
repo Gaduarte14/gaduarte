@@ -185,29 +185,80 @@ export const QuestPortalNotesModule: React.FC<QuestPortalNotesModuleProps> = ({
     const noteDocPath = `userNotes/${firebaseUser.uid}`;
     const noteDocRef = doc(db, 'userNotes', firebaseUser.uid);
 
+    const LEGACY_NOTE_FOLDER_IDS = new Set(['pasta-campanha', 'pasta-grimorio']);
+    const LEGACY_NOTE_IDS = new Set([
+      'nota-diario-campanha',
+      'nota-grimorio-magias',
+      'qp-note-corvo',
+      'qp-note-combate',
+    ]);
+
     const unsub = onSnapshot(
       noteDocRef,
       (snap) => {
         if (!snap.exists()) return;
         const data = snap.data();
         isRemoteSnapshotRef.current = true;
+        let legacyCleaned = false;
+        let nextFoldersToSave: QuestPortalFolder[] | null = null;
+        let nextNotesToSave: QuestPortalNote[] | null = null;
+
         if (Array.isArray(data.folders)) {
+          const rawFolders = data.folders as QuestPortalFolder[];
+          const strippedFolders = rawFolders.filter((f) => {
+            if (LEGACY_NOTE_FOLDER_IDS.has(f.id)) {
+              legacyCleaned = true;
+              return false;
+            }
+            return true;
+          });
           const validFolders = filterPrivateFoldersByCreator(
-            data.folders as QuestPortalFolder[],
+            strippedFolders.length > 0
+              ? strippedFolders
+              : createDefaultQuestPortalFolders(effectiveOwnerId),
             effectiveOwnerId
           );
+          nextFoldersToSave = validFolders;
           memoryFoldersCache.set(effectiveOwnerId, validFolders);
           setFolders(validFolders);
         }
         if (Array.isArray(data.notes) && data.notes.length > 0) {
+          const rawNotes = data.notes as QuestPortalNote[];
+          const strippedNotes = rawNotes.filter((n) => {
+            if (LEGACY_NOTE_IDS.has(n.id)) {
+              legacyCleaned = true;
+              return false;
+            }
+            return true;
+          });
           const validNotes = filterPrivateNotesByCreator(
-            data.notes as QuestPortalNote[],
+            strippedNotes.length > 0
+              ? strippedNotes
+              : createDefaultQuestPortalNotes(
+                  nomePersonagem,
+                  classePersonagem,
+                  nivelPersonagem,
+                  effectiveOwnerId
+                ),
             effectiveOwnerId
           );
           if (validNotes.length > 0) {
+            nextNotesToSave = validNotes;
             memoryNotesCache.set(effectiveOwnerId, validNotes);
             setNotes(validNotes);
           }
+        }
+        if (legacyCleaned) {
+          setDoc(
+            noteDocRef,
+            sanitizeForFirestore({
+              ownerId: firebaseUser.uid,
+              folders: nextFoldersToSave ?? data.folders,
+              notes: nextNotesToSave ?? data.notes,
+              updatedAt: Date.now(),
+            }),
+            { merge: true }
+          ).catch(() => {});
         }
         window.setTimeout(() => {
           isRemoteSnapshotRef.current = false;

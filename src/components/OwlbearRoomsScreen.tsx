@@ -87,29 +87,53 @@ export function compressRoomImageFile(file: File, maxDim: number = 880): Promise
 
 let memorySavedRooms: OwlbearRoomItem[] | null = null;
 
+export function sanitizeSavedRoomsList(rooms: OwlbearRoomItem[]): {
+  cleaned: OwlbearRoomItem[];
+  didChange: boolean;
+} {
+  let didChange = false;
+  const migrated = rooms.map((r) => {
+    if (r.codigo && r.codigo.toUpperCase().startsWith('OWL-')) {
+      didChange = true;
+      return {
+        ...r,
+        codigo: `RPT-${r.codigo.slice(4)}`,
+      };
+    }
+    return r;
+  });
+  const unique = ensureUniqueGmRoomCodes(migrated);
+  return { cleaned: unique, didChange };
+}
+
 export function loadSavedOwlbearRooms(
   defaultCampaignName: string,
   defaultCampaignCode: string,
   defaultCoverUrl?: string
 ): OwlbearRoomItem[] {
+  const normalizedDefaultCode =
+    defaultCampaignCode && defaultCampaignCode.toUpperCase().startsWith('OWL-')
+      ? `RPT-${defaultCampaignCode.slice(4)}`
+      : defaultCampaignCode || 'RPT-5E26';
+
   const seedRoom: OwlbearRoomItem = {
     id: 'room-default-1',
     nome: defaultCampaignName || 'Crônicas de Tarsakh: O Santuário Crepuscular',
-    codigo: defaultCampaignCode || 'OWL-5E26',
+    codigo: normalizedDefaultCode,
     imagemMesaUrl: defaultCoverUrl || SVG_CAMPAIGN_COVER,
     papel: 'mestre',
     criadoEm: 1710000000000,
   };
 
   if (memorySavedRooms && memorySavedRooms.length > 0) {
-    return ensureUniqueGmRoomCodes(memorySavedRooms);
+    return sanitizeSavedRoomsList(memorySavedRooms).cleaned;
   }
 
   return [seedRoom];
 }
 
 export function saveOwlbearRooms(rooms: OwlbearRoomItem[]): void {
-  const normalized = ensureUniqueGmRoomCodes(rooms);
+  const normalized = sanitizeSavedRoomsList(rooms).cleaned;
   memorySavedRooms = normalized;
   const currentUser = auth.currentUser;
   if (currentUser) {
@@ -341,9 +365,10 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
         <div className="px-6 pt-7 pb-5 md:px-9 md:pt-8 flex flex-wrap items-start justify-between gap-4">
           <div className="flex items-center gap-3.5">
             <img
-              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              src="/assets/aistudio/rollportal-logo-192.png"
+              srcSet="/assets/aistudio/rollportal-logo-192.png 1x, /assets/aistudio/rollportal-logo-512.png 2x"
               alt="RollPortal Logo"
-              className="w-12 h-12 rounded-full object-cover shadow-lg border border-violet-400/40 shrink-0"
+              className="w-12 h-12 rounded-full object-contain shadow-lg border border-violet-400/40 shrink-0"
             />
             <div>
               <div className="flex items-center gap-2">

@@ -1487,8 +1487,8 @@ export function computePlayerExploredMemoryCircles(
   for (const t of relevantTokens) {
     const tokenCenterX = (t.x + (t.larguraQuadrados || 1) / 2) * gridSizePx;
     const tokenCenterY = (t.y + (t.alturaQuadrados || 1) / 2) * gridSizePx;
-    // Include previously recorded steps in memoriaExplorada plus current position if vision/light > 0
-    const steps = recordTokenFogMemoryStep(t.memoriaExplorada, t);
+    // Use monotonically recorded steps in memoriaExplorada directly (active vision at (t.x, t.y) is already rendered in Step 3!)
+    const steps = t.memoriaExplorada || [];
     for (const step of steps) {
       if (step.raioQuadrados <= 0) continue;
       const stepXPx = step.x * gridSizePx;

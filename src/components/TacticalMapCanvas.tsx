@@ -192,6 +192,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   // Monotonically increasing sequence counter across the whole session (never reset to 1!)
   const dragSeqRef = useRef<number>(1);
   const lastLiveBroadcastRef = useRef<number>(0);
+  const lastRecordedMemPosRef = useRef<{ x: number; y: number }>({ x: -999, y: -999 });
   const memoryPolygonCacheRef = useRef<Map<string, Array<{ x: number; y: number }>>>(
     new Map()
   );
@@ -546,7 +547,6 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     quantizedDragX,
     quantizedDragY,
     quantizedDragMemCount,
-    liveDragPos?.memoriaExplorada,
     remoteQuantizedKey,
   ]);
 
@@ -1066,20 +1066,27 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               Boolean(scene.colisaoParedesAtiva)
             );
 
-        // Record live Fog of War Memory trail continuously as the token walks across the map!
-        const stepDist = Math.hypot(resolved.x - prevPos.x, resolved.y - prevPos.y);
-        const nextMem =
-          !token.ehFonteDeLuz && stepDist >= 0.2
-            ? recordTokenFogMemoryPath(
-                prevPos.memoriaExplorada ?? token.memoriaExplorada,
-                {
-                  ...token,
-                  x: resolved.x,
-                  y: resolved.y,
-                },
-                { x: prevPos.x, y: prevPos.y }
-              )
-            : prevPos.memoriaExplorada ?? token.memoriaExplorada;
+        // Record live Fog of War Memory trail only when token has moved >= 0.45 grid squares from the last recorded memory position!
+        const memStepDist = Math.hypot(
+          resolved.x - lastRecordedMemPosRef.current.x,
+          resolved.y - lastRecordedMemPosRef.current.y
+        );
+        let nextMem = prevPos.memoriaExplorada ?? token.memoriaExplorada;
+        if (!token.ehFonteDeLuz && memStepDist >= 0.45) {
+          nextMem = recordTokenFogMemoryPath(
+            nextMem,
+            {
+              ...token,
+              x: resolved.x,
+              y: resolved.y,
+            },
+            {
+              x: lastRecordedMemPosRef.current.x,
+              y: lastRecordedMemPosRef.current.y,
+            }
+          );
+          lastRecordedMemPosRef.current = { x: resolved.x, y: resolved.y };
+        }
 
         const nextLiveDrag = {
           tokenId: activeDragId,
@@ -1248,6 +1255,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       memoriaExplorada: initialMem,
     };
     liveDragPosRef.current = initialLive;
+    lastRecordedMemPosRef.current = { x: token.x, y: token.y };
     lastReactFogSyncRef.current = {
       x: token.x,
       y: token.y,
@@ -1858,7 +1866,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 style={{
                   left: 0,
                   top: 0,
-                  transform: `translate3d(${token.x * gridSize}px, ${token.y * gridSize}px, 0)`,
+                  transform: `translate3d(${(liveDragPosRef.current?.tokenId === token.id ? liveDragPosRef.current.x : token.x) * gridSize}px, ${(liveDragPosRef.current?.tokenId === token.id ? liveDragPosRef.current.y : token.y) * gridSize}px, 0)`,
                   width: `${token.larguraQuadrados * gridSize}px`,
                   height: `${token.alturaQuadrados * gridSize}px`,
                   willChange: 'transform',
@@ -1962,7 +1970,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               style={{
                 left: 0,
                 top: 0,
-                transform: `translate3d(${token.x * gridSize}px, ${token.y * gridSize}px, 0)`,
+                transform: `translate3d(${(liveDragPosRef.current?.tokenId === token.id ? liveDragPosRef.current.x : token.x) * gridSize}px, ${(liveDragPosRef.current?.tokenId === token.id ? liveDragPosRef.current.y : token.y) * gridSize}px, 0)`,
                 width: `${token.larguraQuadrados * gridSize}px`,
                 height: `${token.alturaQuadrados * gridSize}px`,
                 willChange: 'transform',
@@ -2162,7 +2170,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           selectedToken.ehFonteDeLuz ||
           !(tokenFogVisibilityMap.get(selectedToken.id)?.insidePlayerFog ?? false)) && (
           <div
-            className="fixed top-14 left-1/2 -translate-x-1/2 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 text-xs text-zinc-100 max-w-[92vw] w-fit mx-auto"
+            className="fixed top-14 left-1/2 -translate-x-1/2 lg:left-[264px] lg:right-[458px] lg:translate-x-0 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 text-xs text-zinc-100 max-w-[92vw] lg:max-w-none w-fit mx-auto"
             role="toolbar"
             aria-label={`Controles do token ${selectedToken.nome}`}
           >

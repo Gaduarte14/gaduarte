@@ -57,7 +57,10 @@ import {
   type LiveTokenDragPacket,
   type AcceptedPacketMeta,
 } from './utils/liveTokenSync.ts';
-import { INITIAL_CAMPAIGN_STATE } from './data/initialCampaign.ts';
+import {
+  INITIAL_CAMPAIGN_STATE,
+  sanitizeLegacyCampaignState,
+} from './data/initialCampaign.ts';
 import type {
   AssetFolder,
   CampaignState,
@@ -108,6 +111,7 @@ import { CampaignHubModal } from './components/CampaignHubModal.tsx';
 import {
   OwlbearRoomsScreen,
   loadSavedOwlbearRooms,
+  sanitizeSavedRoomsList,
   saveOwlbearRooms,
   type OwlbearRoomItem,
 } from './components/OwlbearRoomsScreen.tsx';
@@ -116,15 +120,25 @@ import { RollPortalLoadingScreen } from './components/RollPortalLoadingScreen.ts
 
 const USER_ROLE_STORAGE_KEY = 'owlbear_quest_user_role_v1';
 const FPS_MODE_STORAGE_KEY = 'rollportal_fps_mode_v1';
+const TAB_SESSION_ID_STORAGE_KEY = 'rollportal_tab_session_id_v1';
 
-const clientSessionIdSingleton = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const clientSessionIdSingleton = (() => {
+  try {
+    const existing = sessionStorage.getItem(TAB_SESSION_ID_STORAGE_KEY);
+    if (existing) return existing;
+    const generated = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem(TAB_SESSION_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+})();
 
 export default function App() {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(() => auth.currentUser);
   const [authError, setAuthError] = useState<string>('');
-  const [sessionId, setSessionId] = useState<string>(
-    () => auth.currentUser?.uid || clientSessionIdSingleton
-  );
+  // Always keep a unique sessionId per browser tab/monitor so two windows logged into the same Google account sync live token drags!
+  const [sessionId] = useState<string>(() => clientSessionIdSingleton);
 
   // Initial campaign state seeded and synchronized in real-time via Firestore onSnapshot
   const [campaign, setCampaign] = useState<CampaignState>(() => ({
@@ -354,13 +368,8 @@ export default function App() {
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (u) => {
       setFirebaseUser(u);
-      if (u) {
-        setSessionId(u.uid);
-        if (u.displayName) {
-          setUserName(u.displayName);
-        }
-      } else {
-        setSessionId(clientSessionIdSingleton);
+      if (u && u.displayName) {
+        setUserName(u.displayName);
       }
     });
     return () => unsubAuth();
@@ -402,7 +411,13 @@ export default function App() {
         }
         const data = snap.data();
         if (Array.isArray(data.rooms) && data.rooms.length > 0) {
-          setOwlbearRooms(data.rooms as OwlbearRoomItem[]);
+          const { cleaned, didChange } = sanitizeSavedRoomsList(
+            data.rooms as OwlbearRoomItem[]
+          );
+          setOwlbearRooms(cleaned);
+          if (didChange) {
+            saveOwlbearRooms(cleaned);
+          }
         }
       },
       (err) => {
@@ -416,6 +431,8 @@ export default function App() {
   // Real-time Firestore listener (onSnapshot) for active Campaign Room (/campaigns/{codigoSala})
   const isFirestoreCampaignSnapshotRef = useRef<boolean>(false);
   const lastLocalCampaignWriteTsRef = useRef<number>(0);
+  const lastLocalMutationTsRef = useRef<number>(0);
+  const lastPersistedMutationTsRef = useRef<number>(0);
   const roomOwnerIdRef = useRef<string | null>(null);
   const localTokenCommitsRef = useRef<
     Record<
@@ -430,7 +447,7 @@ export default function App() {
     >
   >({});
 
-  // Ensures any incoming snapshot or broadcast never reverts a token that was moved locally in the last 6 seconds
+  // Ensures any incoming snapshot or broadcast never reverts a token currently being dragged or dropped within the last 1.2s
   const preserveRecentLocalTokens = useCallback((scenes: MapScene[]): MapScene[] => {
     const now = Date.now();
     const activeDragId = currentlyDraggingTokenIdRef.current;
@@ -442,7 +459,7 @@ export default function App() {
         if (
           recent &&
           recent.sceneId === sc.id &&
-          (tok.id === activeDragId || now - recent.ts < 6000)
+          (tok.id === activeDragId || now - recent.ts < 1200)
         ) {
           return {
             ...tok,
@@ -471,29 +488,51 @@ export default function App() {
         if (typeof data.ownerId === 'string' && data.ownerId) {
           roomOwnerIdRef.current = data.ownerId;
         }
-        if (
-          data.updatedBySessionId === sessionIdRef.current &&
-          Date.now() - lastLocalCampaignWriteTsRef.current < 5000
-        ) {
-          return;
-        }
         const remoteCampaign = data.campaign as CampaignState | undefined;
         if (
           remoteCampaign &&
           Array.isArray(remoteCampaign.cenas) &&
           Array.isArray(remoteCampaign.fichas)
         ) {
+          const { cleaned, didChange: legacyWasCleaned } =
+            sanitizeLegacyCampaignState(remoteCampaign);
+
+          // If this snapshot came from our own tab within 3.5s AND did not need legacy cleanup, skip echo
+          if (
+            !legacyWasCleaned &&
+            data.updatedBySessionId === sessionIdRef.current &&
+            Date.now() - lastLocalCampaignWriteTsRef.current < 3500
+          ) {
+            return;
+          }
+
           isFirestoreCampaignSnapshotRef.current = true;
           isRemoteUpdateRef.current = true;
           setCampaign((prev) => ({
-            ...remoteCampaign,
-            cenas: preserveRecentLocalTokens(remoteCampaign.cenas),
+            ...cleaned,
+            cenas: preserveRecentLocalTokens(cleaned.cenas),
             logsCombate:
-              Array.isArray(remoteCampaign.logsCombate) &&
-              remoteCampaign.logsCombate.length > 0
-                ? remoteCampaign.logsCombate
+              Array.isArray(cleaned.logsCombate) && cleaned.logsCombate.length > 0
+                ? cleaned.logsCombate
                 : prev.logsCombate,
           }));
+
+          // Permanently persist the sanitized state back to Firestore if legacy demo items/walls were removed!
+          if (legacyWasCleaned) {
+            setDoc(
+              roomDocRef,
+              sanitizeForFirestore({
+                ownerId: roomOwnerIdRef.current || firebaseUser.uid,
+                updatedBySessionId: sessionIdRef.current,
+                codigoSala: cleaned.codigoSala,
+                nomeCampanha: cleaned.nomeCampanha,
+                campaign: cleaned,
+                updatedAt: Date.now(),
+              }),
+              { merge: true }
+            ).catch(() => {});
+          }
+
           window.setTimeout(() => {
             isRemoteUpdateRef.current = false;
             isFirestoreCampaignSnapshotRef.current = false;
@@ -505,15 +544,64 @@ export default function App() {
       }
     );
 
-    return () => unsub();
+    // Also proactively sanitize legacy `campaigns/OWL-5E26` in Firestore if it exists
+    const legacyOwlRef = doc(db, 'campaigns', 'OWL-5E26');
+    const unsubLegacy = onSnapshot(
+      legacyOwlRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const remoteCamp = data.campaign as CampaignState | undefined;
+        if (remoteCamp) {
+          const { cleaned, didChange } = sanitizeLegacyCampaignState(remoteCamp);
+          if (didChange) {
+            setDoc(
+              legacyOwlRef,
+              sanitizeForFirestore({
+                ...data,
+                codigoSala: 'RPT-5E26',
+                campaign: cleaned,
+                updatedAt: Date.now(),
+              }),
+              { merge: true }
+            ).catch(() => {});
+            setDoc(
+              doc(db, 'campaigns', 'RPT-5E26'),
+              sanitizeForFirestore({
+                ownerId: data.ownerId || firebaseUser.uid,
+                updatedBySessionId: sessionIdRef.current,
+                codigoSala: 'RPT-5E26',
+                nomeCampanha: cleaned.nomeCampanha,
+                campaign: cleaned,
+                updatedAt: Date.now(),
+              }),
+              { merge: true }
+            ).catch(() => {});
+          }
+        }
+      },
+      () => {}
+    );
+
+    return () => {
+      unsub();
+      unsubLegacy();
+    };
   }, [firebaseUser, campaign.codigoSala, preserveRecentLocalTokens]);
 
-  // Debounced Firestore write (setDoc) so dragging/panning/doors never stall the main thread
+  // Debounced Firestore write (setDoc) ONLY when a local mutation has occurred (never echoes remote updates!)
   useEffect(() => {
-    if (!firebaseUser || !campaign.codigoSala || isFirestoreCampaignSnapshotRef.current) {
+    if (
+      !firebaseUser ||
+      !campaign.codigoSala ||
+      isFirestoreCampaignSnapshotRef.current ||
+      lastLocalMutationTsRef.current <= lastPersistedMutationTsRef.current
+    ) {
       return;
     }
+    const mutationToPersist = lastLocalMutationTsRef.current;
     const timer = window.setTimeout(() => {
+      lastPersistedMutationTsRef.current = mutationToPersist;
       lastLocalCampaignWriteTsRef.current = Date.now();
       const roomDocPath = `campaigns/${campaign.codigoSala}`;
       const roomDocRef = doc(db, 'campaigns', campaign.codigoSala);
@@ -537,6 +625,7 @@ export default function App() {
 
   // Sync state to BroadcastChannel + WebSocket (Firestore is persisted asynchronously above for locked 60 FPS)
   const commitCampaignState = (updater: (prev: CampaignState) => CampaignState) => {
+    lastLocalMutationTsRef.current = Date.now();
     setCampaign((prev) => {
       const next = updater(prev);
       next.nomesCampanha = syncCampaignCharacterNames(next.nomesCampanha || [], next.fichas || []);
@@ -620,6 +709,9 @@ export default function App() {
       return;
     }
 
+    // Clear any local commit lock for this token because another window/player is now moving it!
+    delete localTokenCommitsRef.current[packet.tokenId];
+
     lastAcceptedPacketRef.current[packet.tokenId] = {
       movedBy: packet.movedBy,
       seq: packet.seq,
@@ -687,6 +779,7 @@ export default function App() {
           handleRemoteTokenDragCleared(ev.data.payload.tokenId);
         } else if (ev.data?.type === 'token:moved' && ev.data.payload) {
           const { sceneId, tokenId, x, y, memoriaExplorada } = ev.data.payload;
+          delete localTokenCommitsRef.current[tokenId];
           isRemoteUpdateRef.current = true;
           isFirestoreCampaignSnapshotRef.current = true;
           setCampaign((prev) => ({
@@ -723,7 +816,9 @@ export default function App() {
         } else if (ev.data?.type === 'campaign:state' && ev.data.payload) {
           isRemoteUpdateRef.current = true;
           isFirestoreCampaignSnapshotRef.current = true;
-          const incomingPayload = ev.data.payload as CampaignState;
+          const { cleaned: incomingPayload } = sanitizeLegacyCampaignState(
+            ev.data.payload as CampaignState
+          );
           setCampaign((prev) => ({
             ...incomingPayload,
             cenas: Array.isArray(incomingPayload.cenas)
@@ -786,17 +881,18 @@ export default function App() {
               if (msg.payload) {
                 isRemoteUpdateRef.current = true;
                 isFirestoreCampaignSnapshotRef.current = true;
-                const incomingCenas = Array.isArray(msg.payload.cenas)
-                  ? msg.payload.cenas
-                  : [];
+                const { cleaned } = sanitizeLegacyCampaignState(
+                  msg.payload as CampaignState
+                );
+                const incomingCenas = Array.isArray(cleaned.cenas) ? cleaned.cenas : [];
                 setCampaign((prev) => ({
-                  ...msg.payload,
+                  ...cleaned,
                   cenas:
                     incomingCenas.length > 0
                       ? preserveRecentLocalTokens(incomingCenas)
                       : prev.cenas,
-                  mestreSessionId: msg.payload.mestreSessionId ?? prev.mestreSessionId,
-                  mestreNome: msg.payload.mestreNome ?? prev.mestreNome,
+                  mestreSessionId: cleaned.mestreSessionId ?? prev.mestreSessionId,
+                  mestreNome: cleaned.mestreNome ?? prev.mestreNome,
                 }));
                 window.setTimeout(() => {
                   isRemoteUpdateRef.current = false;
@@ -805,6 +901,7 @@ export default function App() {
               }
             } else if (msg.type === 'token:moved' && msg.payload) {
               const { sceneId, tokenId, x, y, memoriaExplorada } = msg.payload;
+              delete localTokenCommitsRef.current[tokenId];
               isRemoteUpdateRef.current = true;
               isFirestoreCampaignSnapshotRef.current = true;
               setCampaign((prev) => ({
@@ -943,6 +1040,7 @@ export default function App() {
 
     // Final release (pointerup):
     currentlyDraggingTokenIdRef.current = null;
+    lastLocalMutationTsRef.current = nowTs;
     lastLocalCampaignWriteTsRef.current = nowTs;
 
     const currentTok = activeScene.tokens.find((t) => t.id === tokenId);
@@ -1654,6 +1752,27 @@ export default function App() {
             ),
           }));
         }}
+        onCommitWallBatch={(mergedWalls) => {
+          if (userRole !== 'mestre') return;
+          setWallUndoStack((prev) => [
+            ...prev.slice(-19),
+            { sceneId: activeScene.id, previousWalls: [...(activeScene.paredes || [])] },
+          ]);
+          commitCampaignState((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === activeScene.id
+                ? {
+                    ...c,
+                    colisaoParedesAtiva: true,
+                    paredes: mergedWalls,
+                  }
+                : c
+            ),
+          }));
+        }}
+        canUndoWallBatch={wallUndoStack.length > 0}
+        onUndoWallBatch={handleUndoWalls}
         onToggleDoorSegment={(segmentId) => {
           commitCampaignState((prev) => ({
             ...prev,
@@ -1722,9 +1841,10 @@ export default function App() {
             className="w-fit bg-[#232530]/95 hover:bg-[#2c2f3e] border border-zinc-700/80 rounded-2xl px-2.5 py-1.5 shadow-2xl pointer-events-auto flex items-center gap-1.5 text-xs font-bold text-violet-200 hover:text-white transition-colors cursor-pointer"
           >
             <img
-              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              src="/assets/aistudio/rollportal-logo-96.png"
+              srcSet="/assets/aistudio/rollportal-logo-96.png 1x, /assets/aistudio/rollportal-logo-192.png 2x"
               alt="RollPortal"
-              className="w-5 h-5 rounded-full object-cover"
+              className="w-5 h-5 rounded-full object-contain"
             />
             <span>RollPortal</span>
             <ChevronDown className="w-3.5 h-3.5 text-violet-400" />
@@ -1736,12 +1856,13 @@ export default function App() {
             onClick={() => setShowCampaignHub(true)}
             aria-label="Abrir Tela Inicial de Personagens e Campanha"
             title="Tela Inicial da Campanha (Nome, Foto de Capa & Fichas)"
-            className="w-7 h-7 rounded-full bg-rose-500/20 border border-rose-400/50 flex items-center justify-center text-rose-300 hover:bg-rose-500 hover:text-white transition-colors cursor-pointer mr-1 overflow-hidden"
+            className="w-7 h-7 rounded-full bg-violet-500/20 border border-violet-400/50 flex items-center justify-center text-violet-200 hover:bg-violet-500 hover:text-white transition-colors cursor-pointer mr-1 overflow-hidden"
           >
             <img
-              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              src="/assets/aistudio/rollportal-logo-96.png"
+              srcSet="/assets/aistudio/rollportal-logo-96.png 1x, /assets/aistudio/rollportal-logo-192.png 2x"
               alt="RollPortal"
-              className="w-full h-full object-cover"
+              className="w-full h-full object-contain"
             />
           </button>
 
@@ -2802,7 +2923,8 @@ export default function App() {
             setShowRoomsScreen(true);
           }}
           onImportCampaignJson={(importedState) => {
-            commitCampaignState(() => importedState);
+            const { cleaned } = sanitizeLegacyCampaignState(importedState);
+            commitCampaignState(() => cleaned);
           }}
         />
       )}

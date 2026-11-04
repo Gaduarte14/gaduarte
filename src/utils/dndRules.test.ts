@@ -834,4 +834,71 @@ test('Smooth Light Falloff: computeLightFalloffIntensity and buildSmoothFalloffG
   }
 });
 
+test('sanitizeLegacyCampaignState strips legacy demo walls, Thorin, Krag, and Braseiro Ancestral while keeping user items', async () => {
+  const { INITIAL_CAMPAIGN_STATE, DEFAULT_SHEETS, sanitizeLegacyCampaignState } = await import(
+    '../data/initialCampaign.ts'
+  );
+
+  const dirtyCampaign = {
+    ...INITIAL_CAMPAIGN_STATE,
+    id: 'camp-owlbear-quest',
+    codigoSala: 'OWL-5E26',
+    fichas: [...DEFAULT_SHEETS],
+    nomesCampanha: ['Elara Sombralua', 'Thorin Escudo de Ferro', 'Krag, Chefe Goblin', 'Heroi Novo'],
+    cenas: [
+      {
+        ...INITIAL_CAMPAIGN_STATE.cenas[0],
+        paredes: [
+          { id: 'wall-nw-s', x1: 0, y1: 8, x2: 9, y2: 8, tipo: 'parede' as const },
+          { id: 'wall-nw-e', x1: 9, y1: 0, x2: 9, y2: 3, tipo: 'parede' as const },
+          { id: 'parede-1715000001-abc', x1: 4, y1: 4, x2: 6, y2: 4, tipo: 'parede' as const },
+          { id: 'wall-pencil-1715000002-1', x1: 6, y1: 4, x2: 8, y2: 4, tipo: 'parede' as const },
+        ],
+        tokens: [
+          ...INITIAL_CAMPAIGN_STATE.cenas[0].tokens,
+          {
+            ...INITIAL_CAMPAIGN_STATE.cenas[0].tokens[0],
+            id: 'tok-thorin',
+            nome: 'Thorin Escudo de Ferro',
+            fichaId: 'char-thorin',
+          },
+          {
+            ...INITIAL_CAMPAIGN_STATE.cenas[0].tokens[0],
+            id: 'tok-brazier',
+            nome: 'Braseiro Ancestral',
+            fichaId: undefined,
+          },
+          {
+            ...INITIAL_CAMPAIGN_STATE.cenas[0].tokens[0],
+            id: 'tok-user-custom',
+            nome: 'Heroi Novo',
+            fichaId: undefined,
+          },
+        ],
+      },
+    ],
+  };
+
+  const { cleaned, didChange } = sanitizeLegacyCampaignState(dirtyCampaign);
+  assert.equal(didChange, true);
+  assert.equal(cleaned.id, 'camp-rollportal');
+  assert.equal(cleaned.codigoSala, 'RPT-5E26');
+  assert.equal(cleaned.fichas.length, 1);
+  assert.equal(cleaned.fichas[0].id, 'char-elara');
+  assert.deepEqual(cleaned.nomesCampanha, ['Elara Sombralua', 'Heroi Novo']);
+  assert.deepEqual(
+    cleaned.cenas[0].paredes?.map((w) => w.id),
+    ['parede-1715000001-abc', 'wall-pencil-1715000002-1']
+  );
+  assert.deepEqual(
+    cleaned.cenas[0].tokens.map((t) => t.id),
+    ['tok-elara', 'tok-user-custom']
+  );
+
+  // Calling a second time on already-cleaned state reports didChange === false
+  const secondPass = sanitizeLegacyCampaignState(cleaned);
+  assert.equal(secondPass.didChange, false);
+});
+
+
 
