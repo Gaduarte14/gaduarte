@@ -96,7 +96,11 @@ import {
   releaseCharacterSheetLock,
   resolveRoomRoleForEntry,
 } from './utils/roomAccessEngine.ts';
-import { TacticalMapCanvas, type ActiveMapTool } from './components/TacticalMapCanvas.tsx';
+import {
+  TacticalMapCanvas,
+  type ActiveMapTool,
+  type FpsMode,
+} from './components/TacticalMapCanvas.tsx';
 import { BottomOwlbearDock } from './components/BottomOwlbearDock.tsx';
 import { RightQuestPortalSidebar } from './components/RightQuestPortalSidebar.tsx';
 import { CharacterSheetDrawer } from './components/CharacterSheetDrawer.tsx';
@@ -108,8 +112,10 @@ import {
   type OwlbearRoomItem,
 } from './components/OwlbearRoomsScreen.tsx';
 import { PersistentAudioEngine } from './components/PersistentAudioEngine.tsx';
+import { RollPortalLoadingScreen } from './components/RollPortalLoadingScreen.tsx';
 
 const USER_ROLE_STORAGE_KEY = 'owlbear_quest_user_role_v1';
+const FPS_MODE_STORAGE_KEY = 'rollportal_fps_mode_v1';
 
 const clientSessionIdSingleton = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -138,6 +144,34 @@ export default function App() {
 
   // Toggle to hide/show the top-left Players & Mestre/Jogador panel
   const [playersPanelOpen, setPlayersPanelOpen] = useState<boolean>(true);
+
+  // 7-second RollPortal intro loading screen (can be skipped via ?skipIntro=1 for automated tests)
+  const [showIntroLoading, setShowIntroLoading] = useState<boolean>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('skipIntro') !== '1';
+  });
+
+  // Configurable FPS Mode ('60' | '120' | '240' | 'unlimited' — defaults to 'unlimited')
+  const [fpsMode, setFpsMode] = useState<FpsMode>(() => {
+    try {
+      const saved = localStorage.getItem(FPS_MODE_STORAGE_KEY);
+      if (saved === '60' || saved === '120' || saved === '240' || saved === 'unlimited') {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return 'unlimited';
+  });
+
+  const handleChangeFpsMode = (nextMode: FpsMode) => {
+    setFpsMode(nextMode);
+    try {
+      localStorage.setItem(FPS_MODE_STORAGE_KEY, nextMode);
+    } catch {
+      // ignore
+    }
+  };
 
   // UI Navigation States:
   // Normal flow: Tela Inicial de Salas (`showRoomsScreen`) -> Campaign Hub (`showCampaignHub`) -> Mesa Tática
@@ -379,6 +413,46 @@ export default function App() {
   // Real-time Firestore listener (onSnapshot) for active Campaign Room (/campaigns/{codigoSala})
   const isFirestoreCampaignSnapshotRef = useRef<boolean>(false);
   const lastLocalCampaignWriteTsRef = useRef<number>(0);
+  const roomOwnerIdRef = useRef<string | null>(null);
+  const localTokenCommitsRef = useRef<
+    Record<
+      string,
+      {
+        sceneId: string;
+        x: number;
+        y: number;
+        memoriaExplorada?: ExploredFogCircle[];
+        ts: number;
+      }
+    >
+  >({});
+
+  // Ensures any incoming snapshot or broadcast never reverts a token that was moved locally in the last 6 seconds
+  const preserveRecentLocalTokens = useCallback((scenes: MapScene[]): MapScene[] => {
+    const now = Date.now();
+    const activeDragId = currentlyDraggingTokenIdRef.current;
+    const commits = localTokenCommitsRef.current;
+    return scenes.map((sc) => ({
+      ...sc,
+      tokens: sc.tokens.map((tok) => {
+        const recent = commits[tok.id];
+        if (
+          recent &&
+          recent.sceneId === sc.id &&
+          (tok.id === activeDragId || now - recent.ts < 6000)
+        ) {
+          return {
+            ...tok,
+            x: recent.x,
+            y: recent.y,
+            memoriaExplorada: recent.memoriaExplorada ?? tok.memoriaExplorada,
+          };
+        }
+        return tok;
+      }),
+    }));
+  }, []);
+
   useEffect(() => {
     if (!firebaseUser || !campaign.codigoSala) return;
     const roomDocPath = `campaigns/${campaign.codigoSala}`;
@@ -391,9 +465,12 @@ export default function App() {
         // Ignore our own local latency-compensated echo so it never interrupts a subsequent drag!
         if (snap.metadata.hasPendingWrites) return;
         const data = snap.data();
+        if (typeof data.ownerId === 'string' && data.ownerId) {
+          roomOwnerIdRef.current = data.ownerId;
+        }
         if (
           data.updatedBySessionId === sessionIdRef.current &&
-          Date.now() - lastLocalCampaignWriteTsRef.current < 4000
+          Date.now() - lastLocalCampaignWriteTsRef.current < 5000
         ) {
           return;
         }
@@ -403,24 +480,11 @@ export default function App() {
           Array.isArray(remoteCampaign.cenas) &&
           Array.isArray(remoteCampaign.fichas)
         ) {
-          const activeDragTokId = currentlyDraggingTokenIdRef.current;
           isFirestoreCampaignSnapshotRef.current = true;
           isRemoteUpdateRef.current = true;
           setCampaign((prev) => ({
             ...remoteCampaign,
-            cenas: activeDragTokId
-              ? remoteCampaign.cenas.map((rc) => {
-                  const localScene = prev.cenas.find((pc) => pc.id === rc.id);
-                  const localDragTok = localScene?.tokens.find((t) => t.id === activeDragTokId);
-                  if (!localDragTok) return rc;
-                  return {
-                    ...rc,
-                    tokens: rc.tokens.map((rt) =>
-                      rt.id === activeDragTokId ? localDragTok : rt
-                    ),
-                  };
-                })
-              : remoteCampaign.cenas,
+            cenas: preserveRecentLocalTokens(remoteCampaign.cenas),
             logsCombate:
               Array.isArray(remoteCampaign.logsCombate) &&
               remoteCampaign.logsCombate.length > 0
@@ -439,9 +503,9 @@ export default function App() {
     );
 
     return () => unsub();
-  }, [firebaseUser, campaign.codigoSala]);
+  }, [firebaseUser, campaign.codigoSala, preserveRecentLocalTokens]);
 
-  // 60 FPS Optimization: Debounced Firestore write (setDoc) so dragging/panning/doors never stall the main thread
+  // Debounced Firestore write (setDoc) so dragging/panning/doors never stall the main thread
   useEffect(() => {
     if (!firebaseUser || !campaign.codigoSala || isFirestoreCampaignSnapshotRef.current) {
       return;
@@ -453,7 +517,7 @@ export default function App() {
       setDoc(
         roomDocRef,
         sanitizeForFirestore({
-          ownerId: firebaseUser.uid,
+          ownerId: roomOwnerIdRef.current || firebaseUser.uid,
           updatedBySessionId: sessionIdRef.current,
           codigoSala: campaign.codigoSala,
           nomeCampanha: campaign.nomeCampanha,
@@ -464,7 +528,7 @@ export default function App() {
       ).catch((err) => {
         handleFirestoreError(err, OperationType.WRITE, roomDocPath);
       });
-    }, 350);
+    }, 250);
     return () => window.clearTimeout(timer);
   }, [campaign, firebaseUser]);
 
@@ -620,8 +684,8 @@ export default function App() {
           handleRemoteTokenDragCleared(ev.data.payload.tokenId);
         } else if (ev.data?.type === 'token:moved' && ev.data.payload) {
           const { sceneId, tokenId, x, y, memoriaExplorada } = ev.data.payload;
-          handleRemoteTokenDragCleared(tokenId);
           isRemoteUpdateRef.current = true;
+          isFirestoreCampaignSnapshotRef.current = true;
           setCampaign((prev) => ({
             ...prev,
             cenas: prev.cenas.map((c) =>
@@ -648,11 +712,25 @@ export default function App() {
                 : c
             ),
           }));
-          isRemoteUpdateRef.current = false;
+          handleRemoteTokenDragCleared(tokenId);
+          window.setTimeout(() => {
+            isRemoteUpdateRef.current = false;
+            isFirestoreCampaignSnapshotRef.current = false;
+          }, 30);
         } else if (ev.data?.type === 'campaign:state' && ev.data.payload) {
           isRemoteUpdateRef.current = true;
-          setCampaign(ev.data.payload);
-          isRemoteUpdateRef.current = false;
+          isFirestoreCampaignSnapshotRef.current = true;
+          const incomingPayload = ev.data.payload as CampaignState;
+          setCampaign((prev) => ({
+            ...incomingPayload,
+            cenas: Array.isArray(incomingPayload.cenas)
+              ? preserveRecentLocalTokens(incomingPayload.cenas)
+              : prev.cenas,
+          }));
+          window.setTimeout(() => {
+            isRemoteUpdateRef.current = false;
+            isFirestoreCampaignSnapshotRef.current = false;
+          }, 30);
         } else if (ev.data?.type === 'roll:pushed' && ev.data.payload) {
           const incoming: CombatLogEntry = ev.data.payload;
           setCampaign((prev) => {
@@ -704,6 +782,7 @@ export default function App() {
             } else if (msg.type === 'campaign:init' || msg.type === 'campaign:state') {
               if (msg.payload) {
                 isRemoteUpdateRef.current = true;
+                isFirestoreCampaignSnapshotRef.current = true;
                 const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
                 const incomingCenas = Array.isArray(msg.payload.cenas)
                   ? msg.payload.cenas.map((c: MapScene) =>
@@ -718,16 +797,22 @@ export default function App() {
                   : [];
                 setCampaign((prev) => ({
                   ...msg.payload,
-                  cenas: incomingCenas.length > 0 ? incomingCenas : prev.cenas,
+                  cenas:
+                    incomingCenas.length > 0
+                      ? preserveRecentLocalTokens(incomingCenas)
+                      : prev.cenas,
                   mestreSessionId: msg.payload.mestreSessionId ?? prev.mestreSessionId,
                   mestreNome: msg.payload.mestreNome ?? prev.mestreNome,
                 }));
-                isRemoteUpdateRef.current = false;
+                window.setTimeout(() => {
+                  isRemoteUpdateRef.current = false;
+                  isFirestoreCampaignSnapshotRef.current = false;
+                }, 30);
               }
             } else if (msg.type === 'token:moved' && msg.payload) {
               const { sceneId, tokenId, x, y, memoriaExplorada } = msg.payload;
-              handleRemoteTokenDragCleared(tokenId);
               isRemoteUpdateRef.current = true;
+              isFirestoreCampaignSnapshotRef.current = true;
               setCampaign((prev) => ({
                 ...prev,
                 cenas: prev.cenas.map((c) =>
@@ -754,7 +839,11 @@ export default function App() {
                     : c
                 ),
               }));
-              isRemoteUpdateRef.current = false;
+              handleRemoteTokenDragCleared(tokenId);
+              window.setTimeout(() => {
+                isRemoteUpdateRef.current = false;
+                isFirestoreCampaignSnapshotRef.current = false;
+              }, 30);
             } else if ((msg.type === 'roll:pushed' || msg.type === 'log:added') && msg.payload) {
               isRemoteUpdateRef.current = true;
               setCampaign((prev) => {
@@ -779,7 +868,7 @@ export default function App() {
       ws?.close();
       bcRef.current?.close();
     };
-  }, [handleIncomingLivePacket, handleRemoteTokenDragCleared]);
+  }, [handleIncomingLivePacket, handleRemoteTokenDragCleared, preserveRecentLocalTokens]);
 
   // Cancel / cleanup live token drag on pointercancel or mid-drag abort
   const handleCancelLiveTokenDrag = useCallback(
@@ -807,8 +896,9 @@ export default function App() {
   );
 
   // Two-Path Real-Time Token Movement Handler:
-  // 1. Live Drag (isLiveDrag === true): sends 164-byte packet via Firebase RTDB + BroadcastChannel + WS (~25ms throttle), 0 Firestore writes.
-  // 2. Final Drop (isLiveDrag === false): clears ephemeral live node and commits final position + Fog Memory trail to Firestore.
+  // Two-Path Real-Time Token Movement Handler:
+  // 1. Live Drag (isLiveDrag === true): sends 164-byte packet via Firebase RTDB + BroadcastChannel + WS, 0 Firestore writes.
+  // 2. Final Drop (isLiveDrag === false): commits final position + Fog Memory trail BEFORE clearing live drag so tokens NEVER snap back!
   const handleMoveToken = (
     tokenId: string,
     newX: number,
@@ -817,6 +907,16 @@ export default function App() {
     seq?: number,
     updatedMemory?: ExploredFogCircle[]
   ) => {
+    const nowTs = Date.now();
+    localTokenCommitsRef.current[tokenId] = {
+      sceneId: activeScene.id,
+      x: newX,
+      y: newY,
+      memoriaExplorada:
+        updatedMemory ?? localTokenCommitsRef.current[tokenId]?.memoriaExplorada,
+      ts: nowTs,
+    };
+
     if (isLiveDrag) {
       currentlyDraggingTokenIdRef.current = tokenId;
       const packet: LiveTokenDragPacket = {
@@ -827,8 +927,8 @@ export default function App() {
         movedBy: sessionId,
         moverName: userName,
         role: userRole,
-        seq: seq ?? Date.now(),
-        ts: Date.now(),
+        seq: seq ?? nowTs,
+        ts: nowTs,
         active: true,
       };
 
@@ -847,61 +947,55 @@ export default function App() {
       return;
     }
 
-    // Final release (pointerup): clear ephemeral live drag channel first
+    // Final release (pointerup):
     currentlyDraggingTokenIdRef.current = null;
-    lastLocalCampaignWriteTsRef.current = Date.now();
-    clearLiveTokenDrag(campaign.codigoSala, activeScene.id, tokenId);
-    if (bcRef.current) {
-      bcRef.current.postMessage({
-        type: 'token:live_clear',
-        payload: { sceneId: activeScene.id, tokenId },
-      });
-    }
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'token:live_clear',
-          payload: { sceneId: activeScene.id, tokenId },
-        })
-      );
-    }
+    lastLocalCampaignWriteTsRef.current = nowTs;
 
-    let resolvedMemoryPayload: ExploredFogCircle[] | undefined = updatedMemory;
+    const currentTok = activeScene.tokens.find((t) => t.id === tokenId);
+    const resolvedMemoryPayload: ExploredFogCircle[] | undefined =
+      updatedMemory ??
+      (currentTok
+        ? recordTokenFogMemoryStep(
+            recordTokenFogMemoryPath(
+              currentTok.memoriaExplorada,
+              { ...currentTok, x: newX, y: newY },
+              { x: currentTok.x, y: currentTok.y }
+            ),
+            { ...currentTok, x: newX, y: newY }
+          )
+        : undefined);
 
-    setCampaign((prev) => {
-      const next: CampaignState = {
-        ...prev,
-        cenas: prev.cenas.map((c) =>
-          c.id === activeScene.id
-            ? {
-                ...c,
-                tokens: c.tokens.map((t) => {
-                  if (t.id !== tokenId) return t;
-                  const nextMem =
-                    updatedMemory ??
-                    recordTokenFogMemoryStep(
-                      recordTokenFogMemoryPath(
-                        t.memoriaExplorada,
-                        { ...t, x: newX, y: newY },
-                        { x: t.x, y: t.y }
-                      ),
-                      { ...t, x: newX, y: newY }
-                    );
-                  resolvedMemoryPayload = nextMem;
-                  return {
-                    ...t,
-                    x: newX,
-                    y: newY,
-                    memoriaExplorada: nextMem,
-                  };
-                }),
-              }
-            : c
-        ),
-      };
-      return next;
-    });
+    localTokenCommitsRef.current[tokenId] = {
+      sceneId: activeScene.id,
+      x: newX,
+      y: newY,
+      memoriaExplorada: resolvedMemoryPayload,
+      ts: nowTs,
+    };
 
+    // 1. Update local campaign state FIRST so scene.tokens already has (newX, newY)
+    setCampaign((prev) => ({
+      ...prev,
+      cenas: prev.cenas.map((c) =>
+        c.id === activeScene.id
+          ? {
+              ...c,
+              tokens: c.tokens.map((t) =>
+                t.id === tokenId
+                  ? {
+                      ...t,
+                      x: newX,
+                      y: newY,
+                      memoriaExplorada: resolvedMemoryPayload ?? t.memoriaExplorada,
+                    }
+                  : t
+              ),
+            }
+          : c
+      ),
+    }));
+
+    // 2. Broadcast final position BEFORE clearing live drag so remote screens never revert to old position!
     if (bcRef.current) {
       bcRef.current.postMessage({
         type: 'token:moved',
@@ -929,6 +1023,29 @@ export default function App() {
         })
       );
     }
+
+    // 3. Publish final snapped position to RTDB and clean up ephemeral node after Firestore syncs
+    const finalPacket: LiveTokenDragPacket = {
+      tokenId,
+      sceneId: activeScene.id,
+      x: Math.round(newX * 1000) / 1000,
+      y: Math.round(newY * 1000) / 1000,
+      movedBy: sessionId,
+      moverName: userName,
+      role: userRole,
+      seq: seq ?? nowTs,
+      ts: nowTs,
+      active: true,
+    };
+    publishLiveTokenDrag(campaign.codigoSala, finalPacket);
+
+    const roomCodeSnap = campaign.codigoSala;
+    const sceneIdSnap = activeScene.id;
+    window.setTimeout(() => {
+      if (currentlyDraggingTokenIdRef.current !== tokenId) {
+        clearLiveTokenDrag(roomCodeSnap, sceneIdSnap, tokenId);
+      }
+    }, 650);
   };
 
   const handleUpdateToken = (updatedToken: MapToken) => {
@@ -1478,6 +1595,14 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#191a21] text-zinc-100 select-none">
+      {/* TELA DE CARREGAMENTO ROLLPORTAL DE 7 SEGUNDOS COM CÍRCULO PONTILHADO RODANDO */}
+      {showIntroLoading && (
+        <RollPortalLoadingScreen
+          durationMs={7000}
+          onFinish={() => setShowIntroLoading(false)}
+        />
+      )}
+
       {/* PERSISTENT BACKGROUND AUDIO ENGINE (Plays audio invisibly even when tab or sidebar is closed) */}
       <PersistentAudioEngine tracks={campaign.faixasMusica} />
 
@@ -1488,6 +1613,7 @@ export default function App() {
         userRole={userRole}
         currentMoverId={sessionId}
         activePlayingSheetId={activePlayingSheetId}
+        fpsMode={fpsMode}
         activeTool={activeMapTool}
         zoom={zoom}
         pan={pan}
@@ -2210,7 +2336,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* BOTTOM-LEFT OPTIONS BUTTON & BOTTOM-RIGHT "5ft" SCALE PILL */}
+      {/* BOTTOM-LEFT OPTIONS BUTTON & BOTTOM-RIGHT FPS + "5ft" SCALE HUD */}
       <button
         type="button"
         onClick={() => setShowCampaignHub(true)}
@@ -2221,15 +2347,44 @@ export default function App() {
         <MoreVertical className="w-4 h-4" />
       </button>
 
-      <button
-        type="button"
-        onClick={() => setZoom(1)}
-        aria-label="Escala da grade 5ft"
-        title="Escala Tática: 1 Quadrado = 5ft (1,5m) · Clique para resetar zoom"
-        className="fixed bottom-4 right-4 z-30 px-3.5 py-2 rounded-full bg-[#232530] border border-zinc-700/80 text-xs font-mono font-semibold text-zinc-200 hover:text-white shadow-xl cursor-pointer tabular-nums"
-      >
-        {activeScene.escalaUnidade} · {Math.round(zoom * 100)}%
-      </button>
+      <div className="fixed bottom-4 right-4 z-30 flex items-center gap-2">
+        <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-[#232530]/95 border border-violet-500/40 shadow-xl">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-violet-300 pl-1">
+            ⚡ FPS:
+          </span>
+          <select
+            aria-label="Selecionar Limite de FPS da Mesa"
+            data-testid="tabletop-fps-mode-select"
+            value={fpsMode}
+            onChange={(e) => handleChangeFpsMode(e.target.value as FpsMode)}
+            className="bg-transparent text-xs font-mono font-bold text-amber-300 focus:outline-none cursor-pointer pr-1"
+            title="Modo de Taxa de Quadros (FPS) para movimentação ultra-leve de tokens"
+          >
+            <option value="unlimited" className="bg-[#181922] text-amber-300">
+              Ilimitado ⚡
+            </option>
+            <option value="240" className="bg-[#181922] text-zinc-100">
+              240 FPS
+            </option>
+            <option value="120" className="bg-[#181922] text-zinc-100">
+              120 FPS
+            </option>
+            <option value="60" className="bg-[#181922] text-zinc-100">
+              60 FPS
+            </option>
+          </select>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setZoom(1)}
+          aria-label="Escala da grade 5ft"
+          title="Escala Tática: 1 Quadrado = 5ft (1,5m) · Clique para resetar zoom"
+          className="px-3.5 py-2 rounded-full bg-[#232530] border border-zinc-700/80 text-xs font-mono font-semibold text-zinc-200 hover:text-white shadow-xl cursor-pointer tabular-nums"
+        >
+          {activeScene.escalaUnidade} · {Math.round(zoom * 100)}%
+        </button>
+      </div>
 
       {/* BOTTOM-CENTER OWLBEAR RODEO DOCK — Exclusivo do Mestre */}
       {userRole === 'mestre' && (

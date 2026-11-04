@@ -71,6 +71,8 @@ export type ActiveMapTool =
   | 'pointer'
   | 'text';
 
+export type FpsMode = '60' | '120' | '240' | 'unlimited';
+
 interface TacticalMapCanvasProps {
   scene: MapScene;
   sheets: CharacterSheet[];
@@ -78,6 +80,7 @@ interface TacticalMapCanvasProps {
   currentMoverId?: string;
   activePlayingSheetId?: string | null;
   remoteLiveDrags?: Record<string, LiveTokenDragPacket>;
+  fpsMode?: FpsMode;
   activeTool: ActiveMapTool;
   zoom: number;
   pan: { x: number; y: number };
@@ -128,6 +131,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   currentMoverId = 'local-user',
   activePlayingSheetId,
   remoteLiveDrags = {},
+  fpsMode = 'unlimited',
   activeTool,
   zoom,
   pan,
@@ -155,8 +159,16 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const fogCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const memoryCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafMoveRef = useRef<number | null>(null);
+  const tokenDomNodesRef = useRef<Record<string, HTMLDivElement | null>>({});
+  const lastReactFogSyncRef = useRef<{ x: number; y: number; ts: number }>({
+    x: -999,
+    y: -999,
+    ts: 0,
+  });
+  const renderedMemoryCountRef = useRef<number>(0);
+  const renderedMemoryContextKeyRef = useRef<string>('');
 
-  // Dragging state & synchronous refs for zero-lag 60fps token movement
+  // Dragging state & synchronous refs for zero-lag Unlimited FPS token movement
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [draggingTokenId, setDraggingTokenId] = useState<string | null>(null);
@@ -186,9 +198,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const [wallCollisionFlash, setWallCollisionFlash] = useState<boolean>(false);
   const [conflictLockNotice, setConflictLockNotice] = useState<string>('');
 
-  // Smooth 60 FPS interpolation state for remote tokens being dragged by other players
+  // Smooth high-FPS interpolation state for remote tokens being dragged by other players
   const [interpolatedRemotePos, setInterpolatedRemotePos] = useState<
-    Record<string, { x: number; y: number; moverName: string }>
+    Record<string, { x: number; y: number; moverName: string; pinnedUntilTs?: number }>
   >({});
   const remoteTargetsRef = useRef<
     Record<string, { targetX: number; targetY: number; moverName: string }>
@@ -313,7 +325,21 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     setActiveWallPencilStroke([]);
   };
 
-  // Sync incoming remoteLiveDrags into remoteTargetsRef and run a 60fps requestAnimationFrame lerp loop
+  // Keep local liveDragPos pinned after pointerup until scene.tokens catches up to the new coordinates
+  // so the token NEVER snaps back to its old position on release!
+  useEffect(() => {
+    if (draggingTokenId !== null || !liveDragPos) return;
+    const tokInScene = scene.tokens.find((t) => t.id === liveDragPos.tokenId);
+    if (
+      !tokInScene ||
+      (Math.abs(tokInScene.x - liveDragPos.x) <= 0.02 &&
+        Math.abs(tokInScene.y - liveDragPos.y) <= 0.02)
+    ) {
+      setLiveDragPos(null);
+    }
+  }, [scene.tokens, liveDragPos, draggingTokenId]);
+
+  // Sync incoming remoteLiveDrags into remoteTargetsRef and keep released tokens pinned until scene.tokens updates
   useEffect(() => {
     const nextTargets: Record<
       string,
@@ -331,23 +357,44 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     }
     remoteTargetsRef.current = nextTargets;
 
-    // Remove finished remote drags immediately from interpolated state
+    const now = Date.now();
     setInterpolatedRemotePos((prev) => {
       let changed = false;
       const copy = { ...prev };
       for (const k of Object.keys(copy)) {
+        const entry = copy[k];
         if (!nextTargets[k]) {
-          delete copy[k];
-          changed = true;
+          const sceneTok = scene.tokens.find((tok) => tok.id === k);
+          const sceneCaughtUp =
+            sceneTok &&
+            Math.abs(sceneTok.x - entry.x) <= 0.05 &&
+            Math.abs(sceneTok.y - entry.y) <= 0.05;
+          if (sceneCaughtUp || (entry.pinnedUntilTs && now > entry.pinnedUntilTs)) {
+            delete copy[k];
+            changed = true;
+          } else if (!entry.pinnedUntilTs || entry.moverName !== '') {
+            copy[k] = {
+              ...entry,
+              moverName: '',
+              pinnedUntilTs: entry.pinnedUntilTs || now + 2500,
+            };
+            changed = true;
+          }
         }
       }
       for (const [k, t] of Object.entries(nextTargets)) {
         if (!copy[k]) {
-          const origTok = scene.tokens.find((tok) => tok.id === k);
           copy[k] = {
-            x: origTok ? origTok.x : t.targetX,
-            y: origTok ? origTok.y : t.targetY,
+            x: t.targetX,
+            y: t.targetY,
             moverName: t.moverName,
+          };
+          changed = true;
+        } else if (copy[k].pinnedUntilTs) {
+          copy[k] = {
+            ...copy[k],
+            moverName: t.moverName,
+            pinnedUntilTs: undefined,
           };
           changed = true;
         }
@@ -356,7 +403,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     });
   }, [remoteLiveDrags, currentMoverId, draggingTokenId, scene.tokens]);
 
-  const hasActiveRemoteTargets = Object.keys(remoteLiveDrags).length > 0;
+  const hasActiveRemoteTargets =
+    Object.keys(remoteLiveDrags).length > 0 || Object.keys(interpolatedRemotePos).length > 0;
 
   useEffect(() => {
     if (!hasActiveRemoteTargets) {
@@ -365,47 +413,52 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
     let rafId: number | null = null;
     let active = true;
+    const lerpAlpha = fpsMode === 'unlimited' || fpsMode === '240' ? 0.72 : 0.58;
 
     const stepFrame = () => {
       if (!active) return;
       const targets = remoteTargetsRef.current;
-      const keys = Object.keys(targets);
-      if (keys.length > 0) {
-        setInterpolatedRemotePos((prev) => {
-          let anyMoved = false;
-          const next = { ...prev };
-          for (const k of keys) {
-            const target = targets[k];
-            if (!target) continue;
-            const curr = next[k] || {
-              x: target.targetX,
-              y: target.targetY,
+      const now = Date.now();
+      setInterpolatedRemotePos((prev) => {
+        let anyChanged = false;
+        const next = { ...prev };
+        for (const k of Object.keys(next)) {
+          const entry = next[k];
+          const target = targets[k];
+          if (!target) {
+            if (entry.pinnedUntilTs && now > entry.pinnedUntilTs) {
+              delete next[k];
+              anyChanged = true;
+            }
+            continue;
+          }
+          const stepped = stepTokenInterpolation(
+            entry.x,
+            entry.y,
+            target.targetX,
+            target.targetY,
+            lerpAlpha,
+            0.002
+          );
+          const domEl = tokenDomNodesRef.current[k];
+          if (domEl) {
+            domEl.style.transform = `translate3d(${stepped.x * gridSize}px, ${stepped.y * gridSize}px, 0)`;
+          }
+          if (
+            Math.abs(stepped.x - entry.x) > 0.0005 ||
+            Math.abs(stepped.y - entry.y) > 0.0005 ||
+            entry.moverName !== target.moverName
+          ) {
+            next[k] = {
+              x: stepped.x,
+              y: stepped.y,
               moverName: target.moverName,
             };
-            const stepped = stepTokenInterpolation(
-              curr.x,
-              curr.y,
-              target.targetX,
-              target.targetY,
-              0.55,
-              0.003
-            );
-            if (
-              Math.abs(stepped.x - curr.x) > 0.0005 ||
-              Math.abs(stepped.y - curr.y) > 0.0005 ||
-              curr.moverName !== target.moverName
-            ) {
-              next[k] = {
-                x: stepped.x,
-                y: stepped.y,
-                moverName: target.moverName,
-              };
-              anyMoved = true;
-            }
+            anyChanged = true;
           }
-          return anyMoved ? next : prev;
-        });
-      }
+        }
+        return anyChanged ? next : prev;
+      });
       rafId = requestAnimationFrame(stepFrame);
     };
 
@@ -414,7 +467,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       active = false;
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [hasActiveRemoteTargets]);
+  }, [hasActiveRemoteTargets, fpsMode, gridSize]);
 
   // Combine scene tokens with 60fps local liveDragPos AND 60fps interpolated remote drags
   const effectiveTokens = useMemo(() => {
@@ -569,9 +622,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   // Clear cached memory visibility polygons whenever walls or doors change state
   useEffect(() => {
     memoryPolygonCacheRef.current.clear();
+    renderedMemoryCountRef.current = 0;
   }, [blockingWallsPx]);
 
-  // Render 3-Tier Dynamic Fog of War + Cached Token Memory + Smooth Falloff Torch Light on Canvas:
+  // Render 3-Tier Dynamic Fog of War + Incremental Cached Token Memory + Smooth Falloff Torch Light on Canvas:
   useEffect(() => {
     const canvas = fogCanvasRef.current;
     if (!canvas) return;
@@ -590,7 +644,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       userRole === 'mestre' ? 'rgba(8, 9, 14, 0.72)' : 'rgba(3, 4, 7, 1.0)';
     ctx.fillRect(0, 0, mapWidthPx, mapHeightPx);
 
-    // 2. Token Memory Layer (Explored trail where tokens walked with Vision or Light)
+    // 2. Token Memory Layer (Incremental offscreen canvas: only draws newly added memory circles during drag!)
     const memoryCircles = computePlayerExploredMemoryCircles(
       fogTokens,
       gridSize,
@@ -601,16 +655,29 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         memoryCanvasRef.current = document.createElement('canvas');
       }
       const memCanvas = memoryCanvasRef.current;
-      if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
+      const contextKey = `${scene.id}:${mapWidthPx}x${mapHeightPx}:${userRole}:${activePlayingSheetId || ''}:${blockingWallsPx.length}`;
+      const sizeChanged =
+        memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx;
+      if (sizeChanged) {
         memCanvas.width = mapWidthPx;
         memCanvas.height = mapHeightPx;
       }
       const memCtx = memCanvas.getContext('2d');
       if (memCtx) {
-        memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
+        let startIdx = renderedMemoryCountRef.current;
+        if (
+          sizeChanged ||
+          renderedMemoryContextKeyRef.current !== contextKey ||
+          memoryCircles.length < startIdx
+        ) {
+          memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
+          startIdx = 0;
+          renderedMemoryContextKeyRef.current = contextKey;
+        }
         memCtx.globalCompositeOperation = 'source-over';
 
-        for (const mc of memoryCircles) {
+        for (let idx = startIdx; idx < memoryCircles.length; idx++) {
+          const mc = memoryCircles[idx];
           if (mc.radiusPx <= 0) continue;
 
           if (blockingWallsPx.length > 0) {
@@ -658,6 +725,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             memCtx.restore();
           }
         }
+        renderedMemoryCountRef.current = memoryCircles.length;
 
         // Cut out explored memory from pitch-black fog (leaving a ~40% dimmed "shroud of memory" over explored areas)
         ctx.globalCompositeOperation = 'destination-out';
@@ -665,9 +733,11 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         ctx.drawImage(memCanvas, 0, 0);
         ctx.globalAlpha = 1.0;
       }
+    } else {
+      renderedMemoryCountRef.current = 0;
     }
 
-    // 3. Active Vision & Active Light Cutout with Smooth Natural Falloff (using quantized fogTokens)
+    // 3. Active Vision & Active Light Cutout with Smooth Natural Falloff (using cached raycast polygons)
     const circles = computeDynamicTokenVisionCircles(
       fogTokens,
       gridSize,
@@ -684,12 +754,17 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       if (c.effectiveRadiusPx <= 0) continue;
 
       if (blockingWallsPx.length > 0) {
-        const poly = computeVisibilityPolygon(
-          c.xPx,
-          c.yPx,
-          c.effectiveRadiusPx,
-          blockingWallsPx
-        );
+        const cacheKey = `${Math.round(c.xPx)},${Math.round(c.yPx)},${Math.round(c.effectiveRadiusPx)}`;
+        let poly = memoryPolygonCacheRef.current.get(cacheKey);
+        if (!poly) {
+          poly = computeVisibilityPolygon(
+            c.xPx,
+            c.yPx,
+            c.effectiveRadiusPx,
+            blockingWallsPx
+          );
+          memoryPolygonCacheRef.current.set(cacheKey, poly);
+        }
         circlePolys.set(idx, poly);
         if (poly.length < 3) continue;
         ctx.save();
@@ -1014,9 +1089,20 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         };
         liveDragPosRef.current = nextLiveDrag;
 
-        // Send { tokenId, x, y, seq } immediately every ~25ms over the low-latency live channel (outside setState!)
+        // 0ms Latency Direct GPU DOM Transform: moves token at native pointer rate (Unlimited FPS!)
+        // without waiting for React reconciliation or Fog Canvas redraws!
+        const domEl = tokenDomNodesRef.current[activeDragId];
+        if (domEl) {
+          domEl.style.transform = `translate3d(${resolved.x * gridSize}px, ${resolved.y * gridSize}px, 0)`;
+        }
+
+        // Send { tokenId, x, y, seq } over the low-latency live channel
         const now = performance.now();
-        if (now - lastLiveBroadcastRef.current >= LIVE_SEND_THROTTLE_MS) {
+        const sendIntervalMs =
+          fpsMode === 'unlimited' || fpsMode === '240'
+            ? 16
+            : LIVE_SEND_THROTTLE_MS;
+        if (now - lastLiveBroadcastRef.current >= sendIntervalMs) {
           lastLiveBroadcastRef.current = now;
           dragSeqRef.current += 1;
           onMoveToken(
@@ -1028,16 +1114,53 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           );
         }
 
-        // Coalesce local React DOM state updates at 60fps via requestAnimationFrame
-        if (rafMoveRef.current === null) {
-          rafMoveRef.current = requestAnimationFrame(() => {
-            rafMoveRef.current = null;
-            const latest = liveDragPosRef.current;
+        // Only trigger React state update for Fog of War / HUD when position moves >= 0.16 grid squares
+        const fogDelta = Math.hypot(
+          resolved.x - lastReactFogSyncRef.current.x,
+          resolved.y - lastReactFogSyncRef.current.y
+        );
+        const minFrameIntervalMs =
+          fpsMode === 'unlimited'
+            ? 0
+            : fpsMode === '240'
+              ? 4
+              : fpsMode === '120'
+                ? 8
+                : 16;
+
+        if (
+          fogDelta >= 0.16 ||
+          Boolean(resolved.collided) !== wallCollisionFlash
+        ) {
+          if (
+            fpsMode === 'unlimited' &&
+            now - lastReactFogSyncRef.current.ts >= 14
+          ) {
+            lastReactFogSyncRef.current = {
+              x: resolved.x,
+              y: resolved.y,
+              ts: now,
+            };
             setWallCollisionFlash(Boolean(resolved.collided));
-            if (latest) {
-              setLiveDragPos(latest);
-            }
-          });
+            setLiveDragPos(nextLiveDrag);
+          } else if (
+            rafMoveRef.current === null &&
+            now - lastReactFogSyncRef.current.ts >= minFrameIntervalMs
+          ) {
+            rafMoveRef.current = requestAnimationFrame(() => {
+              rafMoveRef.current = null;
+              const latest = liveDragPosRef.current;
+              if (latest) {
+                lastReactFogSyncRef.current = {
+                  x: latest.x,
+                  y: latest.y,
+                  ts: performance.now(),
+                };
+                setWallCollisionFlash(Boolean(resolved.collided));
+                setLiveDragPos(latest);
+              }
+            });
+          }
         }
       }
       return;
@@ -1125,6 +1248,11 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       memoriaExplorada: initialMem,
     };
     liveDragPosRef.current = initialLive;
+    lastReactFogSyncRef.current = {
+      x: token.x,
+      y: token.y,
+      ts: performance.now(),
+    };
 
     // Monotonic sequence increment (never reset to 1 so subsequent drags are never dropped!)
     dragSeqRef.current += 1;
@@ -1217,12 +1345,25 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
         });
       }
 
+      // Immediately lock the DOM node and liveDragPos to (finalX, finalY) so it NEVER snaps back to old coords!
+      const domEl = tokenDomNodesRef.current[activeDragId];
+      if (domEl) {
+        domEl.style.transform = `translate3d(${finalX * gridSize}px, ${finalY * gridSize}px, 0)`;
+      }
+      setLiveDragPos({
+        tokenId: activeDragId,
+        x: finalX,
+        y: finalY,
+        memoriaExplorada: finalMem,
+      });
+
       dragSeqRef.current += 1;
       // Single atomic commit of final position + accumulated Fog Memory trail!
       onMoveToken(activeDragId, finalX, finalY, false, dragSeqRef.current, finalMem);
+    } else {
+      setLiveDragPos(null);
     }
     setDraggingTokenId(null);
-    setLiveDragPos(null);
     setWallCollisionFlash(false);
   };
 
@@ -1251,7 +1392,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       }
       setWallDraft(null);
     }
-    if (draggingTokenId) {
+    if (draggingTokenIdRef.current || draggingTokenId) {
       finishDragIfActive();
     }
     if (measurePoints) {
@@ -1686,6 +1827,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
             return (
               <div
                 key={token.id}
+                ref={(el) => {
+                  tokenDomNodesRef.current[token.id] = el;
+                }}
                 data-testid={`light-token-${token.id}`}
                 onPointerDown={(e) => startDraggingToken(e, token)}
                 style={{
@@ -1778,6 +1922,9 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           return (
             <div
               key={token.id}
+              ref={(el) => {
+                tokenDomNodesRef.current[token.id] = el;
+              }}
               data-testid={`map-token-${token.id}`}
               onPointerDown={(e) => startDraggingToken(e, token)}
               onDoubleClick={(e) => {
