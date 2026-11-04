@@ -613,7 +613,7 @@ export function isTokenOwnedByViewer(token: MapToken, options?: FogViewerOptions
   if (options.viewerSheetId && token.fichaId === options.viewerSheetId) {
     return true;
   }
-  if (!options.viewerSheetId && options.viewerTokenId && token.id === options.viewerTokenId) {
+  if (options.viewerTokenId && token.id === options.viewerTokenId) {
     return true;
   }
   return false;
@@ -1446,10 +1446,12 @@ export interface ExploredMemoryPixelCircle {
 
 /**
  * Computes the explored Fog of War memory circles (in pixel coordinates) visible to the current viewer.
- * - For a Player (`viewerRole === 'jogador'`): ONLY returns the explored memory trail of their OWN token!
- * - For the GM (`viewerRole === 'mestre'`): Returns explored memory trails of player hero tokens.
- * - When `colisaoParedesAtiva` is enabled, any memory point occluded behind a closed door or solid wall
- *   from the token's current position is excluded so closed rooms stay 100% pitch-black when outside.
+ * - For a Player (`viewerRole === 'jogador'`): Returns the explored memory trail (`memoriaExplorada`) of their OWN token!
+ *   (With fallback to non-hidden hero tokens if no token on the map matches `viewerSheetId`).
+ * - For the GM (`viewerRole === 'mestre'`): Returns explored memory trails of all player hero tokens and any token with recorded memory.
+ * - Note: Each memory circle is individually clipped by `computeVisibilityPolygon(mc.xPx, mc.yPx, mc.radiusPx, blockingWallsPx)`
+ *   when rendered onto the Fog Canvas, so memory never leaks through walls or closed doors into unexplored rooms,
+ *   while preserving 100% of the trail where the token has already walked (even after turning corners or closing doors).
  */
 export function computePlayerExploredMemoryCircles(
   tokens: MapToken[],
@@ -1460,11 +1462,19 @@ export function computePlayerExploredMemoryCircles(
     options?.viewerRole === 'jogador' &&
     Boolean(options.viewerSheetId || options.viewerTokenId);
 
-  const blockingWallsPx = getBlockingWallsPx(
-    options?.paredes,
-    gridSizePx,
-    Boolean(options?.colisaoParedesAtiva)
-  );
+  // Only closed doors (not solid corridor walls) block historical memory of a room whose door was shut:
+  // each memory circle is already clipped against all solid walls + closed doors via computeVisibilityPolygon!
+  const closedDoorsPx =
+    options?.colisaoParedesAtiva && options?.paredes
+      ? options.paredes
+          .filter((w) => w.tipo === 'porta' && !w.aberta)
+          .map((w) => ({
+            x1: w.x1 * gridSizePx,
+            y1: w.y1 * gridSizePx,
+            x2: w.x2 * gridSizePx,
+            y2: w.y2 * gridSizePx,
+          }))
+      : [];
 
   const relevantTokens = tokens.filter((t) => {
     if (t.ehFonteDeLuz) return false;
@@ -1472,7 +1482,9 @@ export function computePlayerExploredMemoryCircles(
     if (options?.viewerRole === 'mestre') {
       return (
         isTokenOwnedByViewer(t, options) ||
-        Boolean(t.fichaId && t.fichaId !== 'char-goblin-chefe')
+        Boolean(t.memoriaExplorada && t.memoriaExplorada.length > 0) ||
+        Boolean(t.fichaId && t.fichaId !== 'char-goblin-chefe') ||
+        (!t.fichaId && ((t.visaoQuadrados || 0) > 0 || (t.luzQuadrados || 0) > 0))
       );
     }
     if (isStrictPlayerView) {
@@ -1485,24 +1497,23 @@ export function computePlayerExploredMemoryCircles(
   for (const t of relevantTokens) {
     const tokenCenterX = (t.x + (t.larguraQuadrados || 1) / 2) * gridSizePx;
     const tokenCenterY = (t.y + (t.alturaQuadrados || 1) / 2) * gridSizePx;
-    // Include previously recorded steps in memoriaExplorada
+    // Include previously recorded steps in memoriaExplorada plus current position if vision/light > 0
     const steps = recordTokenFogMemoryStep(t.memoriaExplorada, t);
     for (const step of steps) {
       if (step.raioQuadrados <= 0) continue;
       const stepXPx = step.x * gridSizePx;
       const stepYPx = step.y * gridSizePx;
 
-      // If walls/doors are active and a blocking wall/closed door separates the token from this memory step,
-      // do not let it lighten a closed room!
+      // If a closed door directly separates the token from a memory step inside that closed room, keep the closed room dark
       if (
-        blockingWallsPx.length > 0 &&
+        closedDoorsPx.length > 0 &&
         !isPointVisibleFromOrigin(
           tokenCenterX,
           tokenCenterY,
           stepXPx,
           stepYPx,
           1e9,
-          blockingWallsPx
+          closedDoorsPx
         )
       ) {
         continue;

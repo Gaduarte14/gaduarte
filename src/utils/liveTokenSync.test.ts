@@ -54,6 +54,17 @@ describe('Movimento de Token em Tempo Real (liveTokenSync)', () => {
       ),
       false
     );
+
+    // Aceita imediatamente um segundo arrasto consecutivo (mesmo se seq começar em 1 com ts mais novo ou se seq continuar crescendo)
+    assert.equal(
+      shouldAcceptRemoteLivePacket(
+        { ...basePacket, seq: 1, ts: 1200 },
+        'user-me',
+        null,
+        { movedBy: 'user-other', seq: 25, ts: 1000 }
+      ),
+      true
+    );
   });
 
   it('canUserStartDraggingToken respeita permissões (Mestre vs Jogador) e bloqueia conflito simultâneo', () => {

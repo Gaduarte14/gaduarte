@@ -1,7 +1,7 @@
 import type { MapToken } from '../types/vtt.ts';
 
-/** Intervalo de envio ao vivo durante o arrasto (entre 30ms e 60ms -> ~22 envios/seg) */
-export const LIVE_SEND_THROTTLE_MS = 45;
+/** Intervalo de envio ao vivo durante o arrasto (~25ms -> ~40 envios/seg para resposta imediata) */
+export const LIVE_SEND_THROTTLE_MS = 25;
 
 /** Tempo máximo para expirar automaticamente um arrasto remoto caso a aba caia antes do onDisconnect */
 export const STALE_DRAG_TIMEOUT_MS = 4000;
@@ -29,7 +29,8 @@ export interface AcceptedPacketMeta {
 /**
  * Filtra pacotes recebidos no canal ao vivo:
  * 1. Ignora eco (pacotes enviados pelo próprio usuário ou do token que o próprio usuário está arrastando).
- * 2. Descarta pacotes antigos ou fora de ordem (seq <= último seq aceito do mesmo remetente, ou timestamp mais antigo).
+ * 2. Descarta pacotes antigos ou fora de ordem (seq <= último seq aceito do mesmo remetente),
+ *    mas aceita imediatamente o início de um novo gesto de arrasto (seq === 1 com timestamp mais recente).
  */
 export function shouldAcceptRemoteLivePacket(
   incoming: LiveTokenDragPacket,
@@ -51,10 +52,11 @@ export function shouldAcceptRemoteLivePacket(
     return false;
   }
 
-  // 2. Descartar pacotes fora de ordem ou atrasados
+  // 2. Descartar pacotes fora de ordem ou atrasados, permitindo novo arrasto imediato
   if (lastAccepted) {
     if (incoming.movedBy === lastAccepted.movedBy) {
-      if (incoming.seq <= lastAccepted.seq) {
+      const isNewGestureStart = incoming.seq === 1 && incoming.ts >= lastAccepted.ts;
+      if (!isNewGestureStart && incoming.seq <= lastAccepted.seq) {
         return false;
       }
     } else if (incoming.ts < lastAccepted.ts) {
@@ -118,14 +120,14 @@ export function canUserStartDraggingToken(
 
 /**
  * Calcula um passo de interpolação suave (lerp) para animar o token remoto a 60 FPS
- * sem "pular" entre os pacotes de rede recebidos a cada ~45ms.
+ * sem atraso perceptível entre os pacotes de rede recebidos a cada ~25ms.
  */
 export function stepTokenInterpolation(
   currentX: number,
   currentY: number,
   targetX: number,
   targetY: number,
-  alpha: number = 0.32,
+  alpha: number = 0.55,
   snapEpsilon: number = 0.004
 ): { x: number; y: number; settled: boolean } {
   const dx = targetX - currentX;
@@ -136,7 +138,9 @@ export function stepTokenInterpolation(
     return { x: targetX, y: targetY, settled: true };
   }
 
-  const clampedAlpha = Math.max(0.05, Math.min(1, alpha));
+  // Se a distância for grande (> 3 quadrados), aproxima mais rápido para não ficar com delay atrás do mouse
+  const effectiveAlpha = dist > 3 ? Math.max(alpha, 0.78) : alpha;
+  const clampedAlpha = Math.max(0.05, Math.min(1, effectiveAlpha));
   return {
     x: currentX + dx * clampedAlpha,
     y: currentY + dy * clampedAlpha,

@@ -151,9 +151,15 @@ export async function logoutFirebase(): Promise<void> {
 
 // ============================================================================
 // CANAL AO VIVO DE BAIXA LATÊNCIA (Firebase Realtime Database: /live/{salaId}/{sceneId}/{tokenId})
-// Envia apenas ~160 bytes (tokenId + x + y + seq + ts) a cada ~45ms durante o arrasto
+// Envia apenas ~160 bytes (tokenId + x + y + seq + ts) a cada ~25ms durante o arrasto
 // ============================================================================
 const registeredDisconnectKeys = new Set<string>();
+const localDragGeneration = new Map<string, number>();
+let rtdbWriteDenied = false;
+
+onAuthStateChanged(auth, () => {
+  rtdbWriteDenied = false;
+});
 
 function sanitizeRoomKey(raw: string): string {
   return (raw || 'default').replace(/[.#$[\]/]/g, '_');
@@ -163,12 +169,17 @@ export function publishLiveTokenDrag(
   roomCode: string,
   packet: LiveTokenDragPacket
 ): void {
-  if (!rtdb || !roomCode || !packet.sceneId || !packet.tokenId) return;
+  if (!rtdb || !auth.currentUser || rtdbWriteDenied || !roomCode || !packet.sceneId || !packet.tokenId) {
+    return;
+  }
   const safeRoom = sanitizeRoomKey(roomCode);
   const safeScene = sanitizeRoomKey(packet.sceneId);
   const safeToken = sanitizeRoomKey(packet.tokenId);
   const path = `live/${safeRoom}/${safeScene}/${safeToken}`;
   const tokenRef = ref(rtdb, path);
+
+  const nextGen = (localDragGeneration.get(path) || 0) + 1;
+  localDragGeneration.set(path, nextGen);
 
   // Registra limpeza automática no servidor (onDisconnect) no início do arrasto
   if (!registeredDisconnectKeys.has(path)) {
@@ -177,11 +188,12 @@ export function publishLiveTokenDrag(
       .remove()
       .catch(() => {
         registeredDisconnectKeys.delete(path);
+        rtdbWriteDenied = true;
       });
   }
 
   set(tokenRef, packet).catch(() => {
-    // Falha silenciosa se o usuário ainda não ativou o Realtime Database no console
+    rtdbWriteDenied = true;
   });
 }
 
@@ -190,12 +202,17 @@ export function clearLiveTokenDrag(
   sceneId: string,
   tokenId: string
 ): void {
-  if (!rtdb || !roomCode || !sceneId || !tokenId) return;
+  if (!rtdb || !auth.currentUser || rtdbWriteDenied || !roomCode || !sceneId || !tokenId) {
+    return;
+  }
   const safeRoom = sanitizeRoomKey(roomCode);
   const safeScene = sanitizeRoomKey(sceneId);
   const safeToken = sanitizeRoomKey(tokenId);
   const path = `live/${safeRoom}/${safeScene}/${safeToken}`;
   const tokenRef = ref(rtdb, path);
+
+  const clearGen = (localDragGeneration.get(path) || 0) + 1;
+  localDragGeneration.set(path, clearGen);
 
   if (registeredDisconnectKeys.has(path)) {
     registeredDisconnectKeys.delete(path);
@@ -204,7 +221,9 @@ export function clearLiveTokenDrag(
       .catch(() => {});
   }
 
-  remove(tokenRef).catch(() => {});
+  remove(tokenRef).catch(() => {
+    rtdbWriteDenied = true;
+  });
 }
 
 export function subscribeToRoomLiveTokens(
@@ -213,30 +232,43 @@ export function subscribeToRoomLiveTokens(
   onPacket: (packet: LiveTokenDragPacket) => void,
   onRemoved: (tokenId: string) => void
 ): () => void {
-  if (!rtdb || !roomCode || !sceneId) return () => {};
+  if (!rtdb || !auth.currentUser || rtdbWriteDenied || !roomCode || !sceneId) return () => {};
   const safeRoom = sanitizeRoomKey(roomCode);
   const safeScene = sanitizeRoomKey(sceneId);
   const sceneLiveRef = ref(rtdb, `live/${safeRoom}/${safeScene}`);
 
-  const handleSnap = (snap: { val: () => unknown }) => {
+  const handleSnap = (snap: { key: string | null; val: () => unknown }) => {
+    if (rtdbWriteDenied) return;
     const data = snap.val() as LiveTokenDragPacket | null;
-    if (data && data.tokenId && typeof data.x === 'number' && typeof data.y === 'number') {
+    if (!data || !data.active) {
+      const removedId = data?.tokenId || snap.key;
+      if (removedId) onRemoved(removedId);
+      return;
+    }
+    if (data.tokenId && typeof data.x === 'number' && typeof data.y === 'number') {
       onPacket(data);
     }
   };
 
-  const unsubAdd = onChildAdded(sceneLiveRef, handleSnap, () => {});
-  const unsubChange = onChildChanged(sceneLiveRef, handleSnap, () => {});
+  const unsubAdd = onChildAdded(sceneLiveRef, handleSnap, () => {
+    rtdbWriteDenied = true;
+  });
+  const unsubChange = onChildChanged(sceneLiveRef, handleSnap, () => {
+    rtdbWriteDenied = true;
+  });
   const unsubRemove = onChildRemoved(
     sceneLiveRef,
     (snap) => {
+      if (rtdbWriteDenied) return;
       const data = snap.val() as LiveTokenDragPacket | null;
       const removedTokenId = data?.tokenId || snap.key;
       if (removedTokenId) {
         onRemoved(removedTokenId);
       }
     },
-    () => {}
+    () => {
+      rtdbWriteDenied = true;
+    }
   );
 
   return () => {

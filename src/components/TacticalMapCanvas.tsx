@@ -92,7 +92,8 @@ interface TacticalMapCanvasProps {
     newX: number,
     newY: number,
     isLiveDrag?: boolean,
-    seq?: number
+    seq?: number,
+    updatedMemory?: ExploredFogCircle[]
   ) => void;
   onCancelLiveTokenDrag?: (tokenId: string) => void;
   onUpdateToken: (updated: MapToken) => void;
@@ -155,12 +156,19 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const memoryCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafMoveRef = useRef<number | null>(null);
 
-  // Dragging state for pan or 60fps zero-lag token movement
+  // Dragging state & synchronous refs for zero-lag 60fps token movement
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [draggingTokenId, setDraggingTokenId] = useState<string | null>(null);
-  const [dragOffsetGrid, setDragOffsetGrid] = useState({ dx: 0, dy: 0 });
+  const draggingTokenIdRef = useRef<string | null>(null);
+  const dragOffsetGridRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
   const [liveDragPos, setLiveDragPos] = useState<{
+    tokenId: string;
+    x: number;
+    y: number;
+    memoriaExplorada?: ExploredFogCircle[];
+  } | null>(null);
+  const liveDragPosRef = useRef<{
     tokenId: string;
     x: number;
     y: number;
@@ -169,8 +177,12 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const dragOriginRef = useRef<{ tokenId: string; origX: number; origY: number } | null>(
     null
   );
-  const dragSeqRef = useRef<number>(0);
+  // Monotonically increasing sequence counter across the whole session (never reset to 1!)
+  const dragSeqRef = useRef<number>(1);
   const lastLiveBroadcastRef = useRef<number>(0);
+  const memoryPolygonCacheRef = useRef<Map<string, Array<{ x: number; y: number }>>>(
+    new Map()
+  );
   const [wallCollisionFlash, setWallCollisionFlash] = useState<boolean>(false);
   const [conflictLockNotice, setConflictLockNotice] = useState<string>('');
 
@@ -344,61 +356,65 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     });
   }, [remoteLiveDrags, currentMoverId, draggingTokenId, scene.tokens]);
 
+  const hasActiveRemoteTargets = Object.keys(remoteLiveDrags).length > 0;
+
   useEffect(() => {
-    const activeKeys = Object.keys(remoteTargetsRef.current);
-    if (activeKeys.length === 0 && Object.keys(interpolatedRemotePos).length === 0) {
+    if (!hasActiveRemoteTargets) {
       return;
     }
 
     let rafId: number | null = null;
+    let active = true;
+
     const stepFrame = () => {
+      if (!active) return;
       const targets = remoteTargetsRef.current;
       const keys = Object.keys(targets);
-      if (keys.length === 0) return;
-
-      setInterpolatedRemotePos((prev) => {
-        let anyMoved = false;
-        const next = { ...prev };
-        for (const k of keys) {
-          const target = targets[k];
-          if (!target) continue;
-          const curr = next[k] || {
-            x: target.targetX,
-            y: target.targetY,
-            moverName: target.moverName,
-          };
-          const stepped = stepTokenInterpolation(
-            curr.x,
-            curr.y,
-            target.targetX,
-            target.targetY,
-            0.35,
-            0.003
-          );
-          if (
-            Math.abs(stepped.x - curr.x) > 0.0005 ||
-            Math.abs(stepped.y - curr.y) > 0.0005 ||
-            curr.moverName !== target.moverName
-          ) {
-            next[k] = {
-              x: stepped.x,
-              y: stepped.y,
+      if (keys.length > 0) {
+        setInterpolatedRemotePos((prev) => {
+          let anyMoved = false;
+          const next = { ...prev };
+          for (const k of keys) {
+            const target = targets[k];
+            if (!target) continue;
+            const curr = next[k] || {
+              x: target.targetX,
+              y: target.targetY,
               moverName: target.moverName,
             };
-            anyMoved = true;
+            const stepped = stepTokenInterpolation(
+              curr.x,
+              curr.y,
+              target.targetX,
+              target.targetY,
+              0.55,
+              0.003
+            );
+            if (
+              Math.abs(stepped.x - curr.x) > 0.0005 ||
+              Math.abs(stepped.y - curr.y) > 0.0005 ||
+              curr.moverName !== target.moverName
+            ) {
+              next[k] = {
+                x: stepped.x,
+                y: stepped.y,
+                moverName: target.moverName,
+              };
+              anyMoved = true;
+            }
           }
-        }
-        return anyMoved ? next : prev;
-      });
-
+          return anyMoved ? next : prev;
+        });
+      }
       rafId = requestAnimationFrame(stepFrame);
     };
 
     rafId = requestAnimationFrame(stepFrame);
     return () => {
+      active = false;
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [remoteLiveDrags, interpolatedRemotePos]);
+  }, [hasActiveRemoteTargets]);
 
   // Combine scene tokens with 60fps local liveDragPos AND 60fps interpolated remote drags
   const effectiveTokens = useMemo(() => {
@@ -410,6 +426,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           ...t,
           x: liveDragPos.x,
           y: liveDragPos.y,
+          memoriaExplorada: liveDragPos.memoriaExplorada ?? t.memoriaExplorada,
         };
       }
       const remotePos = interpolatedRemotePos[t.id];
@@ -429,6 +446,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   const quantizedDragX = liveDragPos ? Math.round(liveDragPos.x * 2) / 2 : null;
   const quantizedDragY = liveDragPos ? Math.round(liveDragPos.y * 2) / 2 : null;
   const quantizedDragTokenId = liveDragPos ? liveDragPos.tokenId : null;
+  const quantizedDragMemCount = liveDragPos?.memoriaExplorada?.length ?? 0;
 
   const remoteQuantizedKey = useMemo(() => {
     const entries = Object.entries(interpolatedRemotePos);
@@ -442,10 +460,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
   }, [interpolatedRemotePos]);
 
   const fogTokens = useMemo(() => {
-    if (
-      !quantizedDragTokenId &&
-      !remoteQuantizedKey
-    ) {
+    if (!quantizedDragTokenId && !remoteQuantizedKey) {
       return scene.tokens;
     }
     return scene.tokens.map((t) => {
@@ -459,6 +474,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           ...t,
           x: quantizedDragX,
           y: quantizedDragY,
+          memoriaExplorada: liveDragPos?.memoriaExplorada ?? t.memoriaExplorada,
         };
       }
       const rem = interpolatedRemotePos[t.id];
@@ -476,6 +492,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     quantizedDragTokenId,
     quantizedDragX,
     quantizedDragY,
+    quantizedDragMemCount,
+    liveDragPos?.memoriaExplorada,
     remoteQuantizedKey,
   ]);
 
@@ -548,88 +566,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
     fogViewerOptions,
   ]);
 
-  // Cache Layer 2 (Explored Memory Trail) in its own offscreen canvas so historical memory circles
-  // are NEVER re-raycasted while dragging a token!
-  const hasMemoryCirclesRef = useRef<boolean>(false);
+  // Clear cached memory visibility polygons whenever walls or doors change state
   useEffect(() => {
-    if (!scene.nevoaAtiva) {
-      hasMemoryCirclesRef.current = false;
-      return;
-    }
-    const memoryCircles = computePlayerExploredMemoryCircles(
-      scene.tokens,
-      gridSize,
-      fogViewerOptions
-    );
-    if (memoryCircles.length === 0) {
-      hasMemoryCirclesRef.current = false;
-      return;
-    }
-    hasMemoryCirclesRef.current = true;
-    if (!memoryCanvasRef.current) {
-      memoryCanvasRef.current = document.createElement('canvas');
-    }
-    const memCanvas = memoryCanvasRef.current;
-    if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
-      memCanvas.width = mapWidthPx;
-      memCanvas.height = mapHeightPx;
-    }
-    const memCtx = memCanvas.getContext('2d');
-    if (!memCtx) return;
-
-    memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
-    memCtx.globalCompositeOperation = 'source-over';
-    const memStops = buildSmoothFalloffGradientStops(0.45);
-    for (const mc of memoryCircles) {
-      if (mc.radiusPx <= 0) continue;
-
-      if (blockingWallsPx.length > 0) {
-        const memPoly = computeVisibilityPolygon(
-          mc.xPx,
-          mc.yPx,
-          mc.radiusPx,
-          blockingWallsPx
-        );
-        if (memPoly.length < 3) continue;
-        memCtx.save();
-        memCtx.beginPath();
-        memCtx.moveTo(memPoly[0].x, memPoly[0].y);
-        for (let i = 1; i < memPoly.length; i++) {
-          memCtx.lineTo(memPoly[i].x, memPoly[i].y);
-        }
-        memCtx.closePath();
-        memCtx.clip();
-      }
-
-      const memGrad = memCtx.createRadialGradient(
-        mc.xPx,
-        mc.yPx,
-        0,
-        mc.xPx,
-        mc.yPx,
-        mc.radiusPx
-      );
-      for (const stop of memStops) {
-        memGrad.addColorStop(stop.offset, `rgba(0, 0, 0, ${stop.intensity})`);
-      }
-      memCtx.fillStyle = memGrad;
-      memCtx.beginPath();
-      memCtx.arc(mc.xPx, mc.yPx, mc.radiusPx, 0, Math.PI * 2);
-      memCtx.fill();
-
-      if (blockingWallsPx.length > 0) {
-        memCtx.restore();
-      }
-    }
-  }, [
-    scene.tokens,
-    scene.nevoaAtiva,
-    gridSize,
-    fogViewerOptions,
-    blockingWallsPx,
-    mapWidthPx,
-    mapHeightPx,
-  ]);
+    memoryPolygonCacheRef.current.clear();
+  }, [blockingWallsPx]);
 
   // Render 3-Tier Dynamic Fog of War + Cached Token Memory + Smooth Falloff Torch Light on Canvas:
   useEffect(() => {
@@ -644,18 +584,87 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
     ctx.save();
 
-    // 1. Base Layer: Escuridão Total (100% pitch black for Jogador, translucent preview for Mestre)
+    // 1. Base Layer: Escuridão Total (100% pitch black for Jogador, dark preview for Mestre)
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle =
-      userRole === 'mestre' ? 'rgba(8, 9, 14, 0.66)' : 'rgba(3, 4, 7, 1.0)';
+      userRole === 'mestre' ? 'rgba(8, 9, 14, 0.72)' : 'rgba(3, 4, 7, 1.0)';
     ctx.fillRect(0, 0, mapWidthPx, mapHeightPx);
 
-    // 2. Token Memory Layer (Composited in O(1) from pre-rendered memoryCanvasRef!)
-    if (hasMemoryCirclesRef.current && memoryCanvasRef.current) {
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.globalAlpha = userRole === 'mestre' ? 0.42 : 0.36;
-      ctx.drawImage(memoryCanvasRef.current, 0, 0);
-      ctx.globalAlpha = 1.0;
+    // 2. Token Memory Layer (Explored trail where tokens walked with Vision or Light)
+    const memoryCircles = computePlayerExploredMemoryCircles(
+      fogTokens,
+      gridSize,
+      fogViewerOptions
+    );
+    if (memoryCircles.length > 0) {
+      if (!memoryCanvasRef.current) {
+        memoryCanvasRef.current = document.createElement('canvas');
+      }
+      const memCanvas = memoryCanvasRef.current;
+      if (memCanvas.width !== mapWidthPx || memCanvas.height !== mapHeightPx) {
+        memCanvas.width = mapWidthPx;
+        memCanvas.height = mapHeightPx;
+      }
+      const memCtx = memCanvas.getContext('2d');
+      if (memCtx) {
+        memCtx.clearRect(0, 0, mapWidthPx, mapHeightPx);
+        memCtx.globalCompositeOperation = 'source-over';
+
+        for (const mc of memoryCircles) {
+          if (mc.radiusPx <= 0) continue;
+
+          if (blockingWallsPx.length > 0) {
+            const cacheKey = `${Math.round(mc.xPx)},${Math.round(mc.yPx)},${Math.round(mc.radiusPx)}`;
+            let memPoly = memoryPolygonCacheRef.current.get(cacheKey);
+            if (!memPoly) {
+              memPoly = computeVisibilityPolygon(
+                mc.xPx,
+                mc.yPx,
+                mc.radiusPx,
+                blockingWallsPx
+              );
+              memoryPolygonCacheRef.current.set(cacheKey, memPoly);
+            }
+            if (memPoly.length < 3) continue;
+            memCtx.save();
+            memCtx.beginPath();
+            memCtx.moveTo(memPoly[0].x, memPoly[0].y);
+            for (let i = 1; i < memPoly.length; i++) {
+              memCtx.lineTo(memPoly[i].x, memPoly[i].y);
+            }
+            memCtx.closePath();
+            memCtx.clip();
+          }
+
+          const memGrad = memCtx.createRadialGradient(
+            mc.xPx,
+            mc.yPx,
+            0,
+            mc.xPx,
+            mc.yPx,
+            mc.radiusPx
+          );
+          memGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+          memGrad.addColorStop(0.65, 'rgba(0, 0, 0, 0.92)');
+          memGrad.addColorStop(0.85, 'rgba(0, 0, 0, 0.55)');
+          memGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+          memCtx.fillStyle = memGrad;
+          memCtx.beginPath();
+          memCtx.arc(mc.xPx, mc.yPx, mc.radiusPx, 0, Math.PI * 2);
+          memCtx.fill();
+
+          if (blockingWallsPx.length > 0) {
+            memCtx.restore();
+          }
+        }
+
+        // Cut out explored memory from pitch-black fog (leaving a ~40% dimmed "shroud of memory" over explored areas)
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.globalAlpha = userRole === 'mestre' ? 0.62 : 0.58;
+        ctx.drawImage(memCanvas, 0, 0);
+        ctx.globalAlpha = 1.0;
+      }
     }
 
     // 3. Active Vision & Active Light Cutout with Smooth Natural Falloff (using quantized fogTokens)
@@ -946,11 +955,12 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       return;
     }
 
-    if (draggingTokenId) {
-      const token = scene.tokens.find((t) => t.id === draggingTokenId);
+    const activeDragId = draggingTokenIdRef.current;
+    if (activeDragId) {
+      const token = scene.tokens.find((t) => t.id === activeDragId);
       if (token && !token.bloqueado) {
-        const rawGridX = coords.x / gridSize - dragOffsetGrid.dx;
-        const rawGridY = coords.y / gridSize - dragOffsetGrid.dy;
+        const rawGridX = coords.x / gridSize - dragOffsetGridRef.current.dx;
+        const rawGridY = coords.y / gridSize - dragOffsetGridRef.current.dy;
         const clampedX = Math.max(
           0,
           Math.min(scene.larguraQuadrados - token.larguraQuadrados, rawGridX)
@@ -960,64 +970,75 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           Math.min(scene.alturaQuadrados - token.alturaQuadrados, rawGridY)
         );
 
-        // Coalesce state updates at 60fps via requestAnimationFrame
-        if (rafMoveRef.current !== null) {
-          cancelAnimationFrame(rafMoveRef.current);
+        const prevPos = liveDragPosRef.current || {
+          tokenId: activeDragId,
+          x: token.x,
+          y: token.y,
+          memoriaExplorada: token.memoriaExplorada,
+        };
+
+        // Resolve wall and closed-door collision synchronously!
+        const resolved = token.ehFonteDeLuz
+          ? { x: clampedX, y: clampedY, collided: false }
+          : resolveTokenMovementWithWalls(
+              prevPos.x,
+              prevPos.y,
+              clampedX,
+              clampedY,
+              token.larguraQuadrados || 1,
+              token.alturaQuadrados || 1,
+              scene.paredes,
+              Boolean(scene.colisaoParedesAtiva)
+            );
+
+        // Record live Fog of War Memory trail continuously as the token walks across the map!
+        const stepDist = Math.hypot(resolved.x - prevPos.x, resolved.y - prevPos.y);
+        const nextMem =
+          !token.ehFonteDeLuz && stepDist >= 0.2
+            ? recordTokenFogMemoryPath(
+                prevPos.memoriaExplorada ?? token.memoriaExplorada,
+                {
+                  ...token,
+                  x: resolved.x,
+                  y: resolved.y,
+                },
+                { x: prevPos.x, y: prevPos.y }
+              )
+            : prevPos.memoriaExplorada ?? token.memoriaExplorada;
+
+        const nextLiveDrag = {
+          tokenId: activeDragId,
+          x: resolved.x,
+          y: resolved.y,
+          memoriaExplorada: nextMem,
+        };
+        liveDragPosRef.current = nextLiveDrag;
+
+        // Send { tokenId, x, y, seq } immediately every ~25ms over the low-latency live channel (outside setState!)
+        const now = performance.now();
+        if (now - lastLiveBroadcastRef.current >= LIVE_SEND_THROTTLE_MS) {
+          lastLiveBroadcastRef.current = now;
+          dragSeqRef.current += 1;
+          onMoveToken(
+            activeDragId,
+            Math.round(resolved.x * 100) / 100,
+            Math.round(resolved.y * 100) / 100,
+            true,
+            dragSeqRef.current
+          );
         }
-        rafMoveRef.current = requestAnimationFrame(() => {
-          rafMoveRef.current = null;
-          setLiveDragPos((prev) => {
-            const prevPos = prev ? { x: prev.x, y: prev.y } : { x: token.x, y: token.y };
 
-            // Resolve wall and closed-door collision!
-            const resolved = token.ehFonteDeLuz
-              ? { x: clampedX, y: clampedY, collided: false }
-              : resolveTokenMovementWithWalls(
-                  prevPos.x,
-                  prevPos.y,
-                  clampedX,
-                  clampedY,
-                  token.larguraQuadrados || 1,
-                  token.alturaQuadrados || 1,
-                  scene.paredes,
-                  Boolean(scene.colisaoParedesAtiva)
-                );
-
-            if (resolved.collided) {
-              setWallCollisionFlash(true);
-            } else {
-              setWallCollisionFlash(false);
+        // Coalesce local React DOM state updates at 60fps via requestAnimationFrame
+        if (rafMoveRef.current === null) {
+          rafMoveRef.current = requestAnimationFrame(() => {
+            rafMoveRef.current = null;
+            const latest = liveDragPosRef.current;
+            setWallCollisionFlash(Boolean(resolved.collided));
+            if (latest) {
+              setLiveDragPos(latest);
             }
-
-            // Send only { tokenId, x, y, seq } every ~45ms over the low-latency live channel
-            const now = performance.now();
-            if (now - lastLiveBroadcastRef.current >= LIVE_SEND_THROTTLE_MS) {
-              lastLiveBroadcastRef.current = now;
-              dragSeqRef.current += 1;
-              onMoveToken(
-                draggingTokenId,
-                Math.round(resolved.x * 100) / 100,
-                Math.round(resolved.y * 100) / 100,
-                true,
-                dragSeqRef.current
-              );
-            }
-
-            if (
-              prev &&
-              Math.abs(prev.x - resolved.x) < 0.002 &&
-              Math.abs(prev.y - resolved.y) < 0.002
-            ) {
-              return prev;
-            }
-
-            return {
-              tokenId: draggingTokenId,
-              x: resolved.x,
-              y: resolved.y,
-            };
           });
-        });
+        }
       }
       return;
     }
@@ -1081,39 +1102,44 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       return;
     }
 
-    if ('pointerId' in e && typeof e.currentTarget.setPointerCapture === 'function') {
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // ignore synthetic events without active pointerId
-      }
-    }
-
     const coords = clientToMapCoords(e.clientX, e.clientY);
+    const offset = {
+      dx: coords.x / gridSize - token.x,
+      dy: coords.y / gridSize - token.y,
+    };
+    const initialMem = token.ehFonteDeLuz
+      ? token.memoriaExplorada
+      : recordTokenFogMemoryStep(token.memoriaExplorada, token);
+
     dragOriginRef.current = {
       tokenId: token.id,
       origX: token.x,
       origY: token.y,
     };
-    dragSeqRef.current = 1;
-    lastLiveBroadcastRef.current = performance.now();
-    setDraggingTokenId(token.id);
-    setDragOffsetGrid({
-      dx: coords.x / gridSize - token.x,
-      dy: coords.y / gridSize - token.y,
-    });
-    setLiveDragPos({
+    draggingTokenIdRef.current = token.id;
+    dragOffsetGridRef.current = offset;
+    const initialLive = {
       tokenId: token.id,
       x: token.x,
       y: token.y,
-    });
-    // Send initial live drag packet immediately (seq = 1) so other players see the drag start right away
+      memoriaExplorada: initialMem,
+    };
+    liveDragPosRef.current = initialLive;
+
+    // Monotonic sequence increment (never reset to 1 so subsequent drags are never dropped!)
+    dragSeqRef.current += 1;
+    lastLiveBroadcastRef.current = performance.now();
+
+    setDraggingTokenId(token.id);
+    setLiveDragPos(initialLive);
+
+    // Send initial live drag packet immediately so other players see the drag start right away
     onMoveToken(
       token.id,
       Math.round(token.x * 100) / 100,
       Math.round(token.y * 100) / 100,
       true,
-      1
+      dragSeqRef.current
     );
   };
 
@@ -1122,10 +1148,13 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       cancelAnimationFrame(rafMoveRef.current);
       rafMoveRef.current = null;
     }
-    if (draggingTokenId) {
-      onCancelLiveTokenDrag?.(draggingTokenId);
-    }
+    const activeDragId = draggingTokenIdRef.current || draggingTokenId;
+    draggingTokenIdRef.current = null;
+    liveDragPosRef.current = null;
     dragOriginRef.current = null;
+    if (activeDragId) {
+      onCancelLiveTokenDrag?.(activeDragId);
+    }
     setDraggingTokenId(null);
     setLiveDragPos(null);
     setWallCollisionFlash(false);
@@ -1136,22 +1165,28 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       cancelAnimationFrame(rafMoveRef.current);
       rafMoveRef.current = null;
     }
-    if (draggingTokenId && liveDragPos) {
+    const activeDragId = draggingTokenIdRef.current || draggingTokenId;
+    const currentDrag = liveDragPosRef.current || liveDragPos;
+    draggingTokenIdRef.current = null;
+    liveDragPosRef.current = null;
+    dragOriginRef.current = null;
+
+    if (activeDragId && currentDrag) {
       const snapEnabled = scene.snappingAtivo !== false;
       const rawSnapX = snapEnabled
-        ? Math.round(liveDragPos.x * 2) / 2
-        : Math.round(liveDragPos.x * 100) / 100;
+        ? Math.round(currentDrag.x * 2) / 2
+        : Math.round(currentDrag.x * 100) / 100;
       const rawSnapY = snapEnabled
-        ? Math.round(liveDragPos.y * 2) / 2
-        : Math.round(liveDragPos.y * 100) / 100;
-      const origToken = scene.tokens.find((t) => t.id === draggingTokenId);
+        ? Math.round(currentDrag.y * 2) / 2
+        : Math.round(currentDrag.y * 100) / 100;
+      const origToken = scene.tokens.find((t) => t.id === activeDragId);
 
       // Ensure final snap also respects walls/closed doors
       const resolvedFinal =
         origToken && !origToken.ehFonteDeLuz
           ? resolveTokenMovementWithWalls(
-              liveDragPos.x,
-              liveDragPos.y,
+              currentDrag.x,
+              currentDrag.y,
               rawSnapX,
               rawSnapY,
               origToken.larguraQuadrados || 1,
@@ -1164,34 +1199,28 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       const finalX = resolvedFinal.x;
       const finalY = resolvedFinal.y;
 
-      dragSeqRef.current += 1;
-      // Always flush the final position and persist to Firestore on release
-      onMoveToken(draggingTokenId, finalX, finalY, false, dragSeqRef.current);
-
+      let finalMem = currentDrag.memoriaExplorada ?? origToken?.memoriaExplorada;
       if (origToken && !origToken.ehFonteDeLuz) {
         const pathMem = recordTokenFogMemoryPath(
-          origToken.memoriaExplorada,
+          finalMem,
           {
             ...origToken,
             x: finalX,
             y: finalY,
           },
-          { x: origToken.x, y: origToken.y }
+          { x: currentDrag.x, y: currentDrag.y }
         );
-        const finalMem = recordTokenFogMemoryStep(pathMem, {
+        finalMem = recordTokenFogMemoryStep(pathMem, {
           ...origToken,
           x: finalX,
           y: finalY,
-        });
-        onUpdateToken({
-          ...origToken,
-          x: finalX,
-          y: finalY,
-          memoriaExplorada: finalMem,
         });
       }
+
+      dragSeqRef.current += 1;
+      // Single atomic commit of final position + accumulated Fog Memory trail!
+      onMoveToken(activeDragId, finalX, finalY, false, dragSeqRef.current, finalMem);
     }
-    dragOriginRef.current = null;
     setDraggingTokenId(null);
     setLiveDragPos(null);
     setWallCollisionFlash(false);

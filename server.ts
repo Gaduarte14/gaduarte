@@ -155,14 +155,29 @@ async function startServer() {
             break;
           }
           case 'token:move': {
-            const { sceneId, tokenId, x, y } = msg.payload || {};
+            const { sceneId, tokenId, x, y, memoriaExplorada } = msg.payload || {};
             const scene = serverCampaignState.cenas.find((c) => c.id === sceneId);
             if (scene) {
               const token = scene.tokens.find((t) => t.id === tokenId);
               if (token && typeof x === 'number' && typeof y === 'number') {
                 token.x = x;
                 token.y = y;
-                broadcast({ type: 'token:moved', payload: { sceneId, tokenId, x, y } }, ws);
+                if (Array.isArray(memoriaExplorada)) {
+                  token.memoriaExplorada = memoriaExplorada;
+                }
+                broadcast(
+                  {
+                    type: 'token:moved',
+                    payload: {
+                      sceneId,
+                      tokenId,
+                      x,
+                      y,
+                      memoriaExplorada: token.memoriaExplorada,
+                    },
+                  },
+                  ws
+                );
               }
             }
             break;

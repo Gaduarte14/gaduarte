@@ -548,6 +548,20 @@ test('Token Fog Memory (memoriaExplorada) records path where player token walked
   assert.equal(circlesWithPlacedLight.length, 1);
   assert.equal(circlesWithPlacedLight[0].tokenId, placedLight.id);
   assert.equal(circlesWithPlacedLight[0].lightRadiusPx, 5 * 64);
+
+  // Even when solid walls (parede) exist between Elara's current position (8, 2) and her past trail at (2, 2),
+  // her explored Fog Memory trail around solid walls is 100% preserved!
+  const corridorWalls = [
+    { id: 'w-corner', x1: 5, y1: 0, x2: 5, y2: 5, tipo: 'parede' as const },
+  ];
+  const exploredAroundSolidWall = computePlayerExploredMemoryCircles([elara], 64, {
+    viewerRole: 'jogador',
+    viewerSheetId: 'char-elara',
+    paredes: corridorWalls,
+    colisaoParedesAtiva: true,
+  });
+  assert.equal(exploredAroundSolidWall.length, memTrail.length);
+  assert.ok(exploredAroundSolidWall.some((c) => c.xPx === 2.5 * 64 && c.yPx === 2.5 * 64));
 });
 
 test('Wall collision & Door open/close system: solid walls and closed doors block both token movement and light/vision rays; open doors allow passage', async () => {

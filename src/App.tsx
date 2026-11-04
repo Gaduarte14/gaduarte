@@ -64,6 +64,7 @@ import type {
   CharacterSheet,
   CombatLogEntry,
   DockCategory,
+  ExploredFogCircle,
   MapDrawing,
   MapScene,
   MapToken,
@@ -377,6 +378,7 @@ export default function App() {
 
   // Real-time Firestore listener (onSnapshot) for active Campaign Room (/campaigns/{codigoSala})
   const isFirestoreCampaignSnapshotRef = useRef<boolean>(false);
+  const lastLocalCampaignWriteTsRef = useRef<number>(0);
   useEffect(() => {
     if (!firebaseUser || !campaign.codigoSala) return;
     const roomDocPath = `campaigns/${campaign.codigoSala}`;
@@ -386,17 +388,39 @@ export default function App() {
       roomDocRef,
       (snap) => {
         if (!snap.exists()) return;
+        // Ignore our own local latency-compensated echo so it never interrupts a subsequent drag!
+        if (snap.metadata.hasPendingWrites) return;
         const data = snap.data();
+        if (
+          data.updatedBySessionId === sessionIdRef.current &&
+          Date.now() - lastLocalCampaignWriteTsRef.current < 4000
+        ) {
+          return;
+        }
         const remoteCampaign = data.campaign as CampaignState | undefined;
         if (
           remoteCampaign &&
           Array.isArray(remoteCampaign.cenas) &&
           Array.isArray(remoteCampaign.fichas)
         ) {
+          const activeDragTokId = currentlyDraggingTokenIdRef.current;
           isFirestoreCampaignSnapshotRef.current = true;
           isRemoteUpdateRef.current = true;
           setCampaign((prev) => ({
             ...remoteCampaign,
+            cenas: activeDragTokId
+              ? remoteCampaign.cenas.map((rc) => {
+                  const localScene = prev.cenas.find((pc) => pc.id === rc.id);
+                  const localDragTok = localScene?.tokens.find((t) => t.id === activeDragTokId);
+                  if (!localDragTok) return rc;
+                  return {
+                    ...rc,
+                    tokens: rc.tokens.map((rt) =>
+                      rt.id === activeDragTokId ? localDragTok : rt
+                    ),
+                  };
+                })
+              : remoteCampaign.cenas,
             logsCombate:
               Array.isArray(remoteCampaign.logsCombate) &&
               remoteCampaign.logsCombate.length > 0
@@ -423,12 +447,14 @@ export default function App() {
       return;
     }
     const timer = window.setTimeout(() => {
+      lastLocalCampaignWriteTsRef.current = Date.now();
       const roomDocPath = `campaigns/${campaign.codigoSala}`;
       const roomDocRef = doc(db, 'campaigns', campaign.codigoSala);
       setDoc(
         roomDocRef,
         sanitizeForFirestore({
           ownerId: firebaseUser.uid,
+          updatedBySessionId: sessionIdRef.current,
           codigoSala: campaign.codigoSala,
           nomeCampanha: campaign.nomeCampanha,
           campaign,
@@ -438,7 +464,7 @@ export default function App() {
       ).catch((err) => {
         handleFirestoreError(err, OperationType.WRITE, roomDocPath);
       });
-    }, 450);
+    }, 350);
     return () => window.clearTimeout(timer);
   }, [campaign, firebaseUser]);
 
@@ -540,6 +566,7 @@ export default function App() {
   }, []);
 
   const handleRemoteTokenDragCleared = useCallback((tokenId: string) => {
+    delete lastAcceptedPacketRef.current[tokenId];
     setRemoteLiveDrags((prev) => {
       if (!(tokenId in prev)) return prev;
       const next = { ...prev };
@@ -568,6 +595,7 @@ export default function App() {
           if (now - pkt.ts <= STALE_DRAG_TIMEOUT_MS) {
             next[tokenId] = pkt;
           } else {
+            delete lastAcceptedPacketRef.current[tokenId];
             changed = true;
           }
         }
@@ -590,6 +618,37 @@ export default function App() {
           handleIncomingLivePacket(ev.data.payload as LiveTokenDragPacket);
         } else if (ev.data?.type === 'token:live_clear' && ev.data.payload?.tokenId) {
           handleRemoteTokenDragCleared(ev.data.payload.tokenId);
+        } else if (ev.data?.type === 'token:moved' && ev.data.payload) {
+          const { sceneId, tokenId, x, y, memoriaExplorada } = ev.data.payload;
+          handleRemoteTokenDragCleared(tokenId);
+          isRemoteUpdateRef.current = true;
+          setCampaign((prev) => ({
+            ...prev,
+            cenas: prev.cenas.map((c) =>
+              c.id === sceneId
+                ? {
+                    ...c,
+                    tokens: c.tokens.map((t) =>
+                      t.id === tokenId
+                        ? {
+                            ...t,
+                            x,
+                            y,
+                            memoriaExplorada:
+                              memoriaExplorada ??
+                              recordTokenFogMemoryPath(
+                                t.memoriaExplorada,
+                                { ...t, x, y },
+                                { x: t.x, y: t.y }
+                              ),
+                          }
+                        : t
+                    ),
+                  }
+                : c
+            ),
+          }));
+          isRemoteUpdateRef.current = false;
         } else if (ev.data?.type === 'campaign:state' && ev.data.payload) {
           isRemoteUpdateRef.current = true;
           setCampaign(ev.data.payload);
@@ -666,7 +725,7 @@ export default function App() {
                 isRemoteUpdateRef.current = false;
               }
             } else if (msg.type === 'token:moved' && msg.payload) {
-              const { sceneId, tokenId, x, y } = msg.payload;
+              const { sceneId, tokenId, x, y, memoriaExplorada } = msg.payload;
               handleRemoteTokenDragCleared(tokenId);
               isRemoteUpdateRef.current = true;
               setCampaign((prev) => ({
@@ -675,7 +734,22 @@ export default function App() {
                   c.id === sceneId
                     ? {
                         ...c,
-                        tokens: c.tokens.map((t) => (t.id === tokenId ? { ...t, x, y } : t)),
+                        tokens: c.tokens.map((t) =>
+                          t.id === tokenId
+                            ? {
+                                ...t,
+                                x,
+                                y,
+                                memoriaExplorada:
+                                  memoriaExplorada ??
+                                  recordTokenFogMemoryPath(
+                                    t.memoriaExplorada,
+                                    { ...t, x, y },
+                                    { x: t.x, y: t.y }
+                                  ),
+                              }
+                            : t
+                        ),
                       }
                     : c
                 ),
@@ -733,14 +807,15 @@ export default function App() {
   );
 
   // Two-Path Real-Time Token Movement Handler:
-  // 1. Live Drag (isLiveDrag === true): sends 164-byte packet via Firebase RTDB + BroadcastChannel + WS (~45ms throttle), 0 Firestore writes.
-  // 2. Final Drop (isLiveDrag === false): clears ephemeral live node and commits final position to Firestore.
+  // 1. Live Drag (isLiveDrag === true): sends 164-byte packet via Firebase RTDB + BroadcastChannel + WS (~25ms throttle), 0 Firestore writes.
+  // 2. Final Drop (isLiveDrag === false): clears ephemeral live node and commits final position + Fog Memory trail to Firestore.
   const handleMoveToken = (
     tokenId: string,
     newX: number,
     newY: number,
     isLiveDrag?: boolean,
-    seq?: number
+    seq?: number,
+    updatedMemory?: ExploredFogCircle[]
   ) => {
     if (isLiveDrag) {
       currentlyDraggingTokenIdRef.current = tokenId;
@@ -774,6 +849,7 @@ export default function App() {
 
     // Final release (pointerup): clear ephemeral live drag channel first
     currentlyDraggingTokenIdRef.current = null;
+    lastLocalCampaignWriteTsRef.current = Date.now();
     clearLiveTokenDrag(campaign.codigoSala, activeScene.id, tokenId);
     if (bcRef.current) {
       bcRef.current.postMessage({
@@ -790,6 +866,8 @@ export default function App() {
       );
     }
 
+    let resolvedMemoryPayload: ExploredFogCircle[] | undefined = updatedMemory;
+
     setCampaign((prev) => {
       const next: CampaignState = {
         ...prev,
@@ -797,35 +875,57 @@ export default function App() {
           c.id === activeScene.id
             ? {
                 ...c,
-                tokens: c.tokens.map((t) =>
-                  t.id === tokenId
-                    ? {
-                        ...t,
-                        x: newX,
-                        y: newY,
-                        memoriaExplorada: recordTokenFogMemoryPath(
-                          t.memoriaExplorada,
-                          { ...t, x: newX, y: newY },
-                          { x: t.x, y: t.y }
-                        ),
-                      }
-                    : t
-                ),
+                tokens: c.tokens.map((t) => {
+                  if (t.id !== tokenId) return t;
+                  const nextMem =
+                    updatedMemory ??
+                    recordTokenFogMemoryStep(
+                      recordTokenFogMemoryPath(
+                        t.memoriaExplorada,
+                        { ...t, x: newX, y: newY },
+                        { x: t.x, y: t.y }
+                      ),
+                      { ...t, x: newX, y: newY }
+                    );
+                  resolvedMemoryPayload = nextMem;
+                  return {
+                    ...t,
+                    x: newX,
+                    y: newY,
+                    memoriaExplorada: nextMem,
+                  };
+                }),
               }
             : c
         ),
       };
-      if (bcRef.current) {
-        bcRef.current.postMessage({ type: 'campaign:state', payload: next });
-      }
       return next;
     });
+
+    if (bcRef.current) {
+      bcRef.current.postMessage({
+        type: 'token:moved',
+        payload: {
+          sceneId: activeScene.id,
+          tokenId,
+          x: newX,
+          y: newY,
+          memoriaExplorada: resolvedMemoryPayload,
+        },
+      });
+    }
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: 'token:move',
-          payload: { sceneId: activeScene.id, tokenId, x: newX, y: newY },
+          payload: {
+            sceneId: activeScene.id,
+            tokenId,
+            x: newX,
+            y: newY,
+            memoriaExplorada: resolvedMemoryPayload,
+          },
         })
       );
     }
