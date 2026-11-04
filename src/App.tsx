@@ -144,6 +144,8 @@ export default function App() {
 
   // Toggle to hide/show the top-left Players & Mestre/Jogador panel
   const [playersPanelOpen, setPlayersPanelOpen] = useState<boolean>(true);
+  // Toggle to minimize/collapse the top-left HUD bar so it never obstructs map view
+  const [topBarCollapsed, setTopBarCollapsed] = useState<boolean>(false);
 
   // 7-second RollPortal intro loading screen (can be skipped via ?skipIntro=1 for automated tests)
   const [showIntroLoading, setShowIntroLoading] = useState<boolean>(() => {
@@ -339,6 +341,7 @@ export default function App() {
       }
     } else {
       setActiveDockCategory(null);
+      setSidebarTab((prev) => (prev === 'musica' ? 'chat' : prev));
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({ type: 'gm:release', payload: { sessionId } })
@@ -783,17 +786,8 @@ export default function App() {
               if (msg.payload) {
                 isRemoteUpdateRef.current = true;
                 isFirestoreCampaignSnapshotRef.current = true;
-                const defaultCrypt = INITIAL_CAMPAIGN_STATE.cenas[0];
                 const incomingCenas = Array.isArray(msg.payload.cenas)
-                  ? msg.payload.cenas.map((c: MapScene) =>
-                      c.id === 'scene-crypt' && (!c.paredes || c.paredes.length === 0)
-                        ? {
-                            ...c,
-                            colisaoParedesAtiva: c.colisaoParedesAtiva ?? true,
-                            paredes: defaultCrypt.paredes,
-                          }
-                        : c
-                    )
+                  ? msg.payload.cenas
                   : [];
                 setCampaign((prev) => ({
                   ...msg.payload,
@@ -1716,17 +1710,39 @@ export default function App() {
         }}
       />
 
-      {/* TOP-LEFT OWLBEAR RODEO HUD BAR + PLAYERS PANEL */}
+      {/* TOP-LEFT ROLLPORTAL HUD BAR + PLAYERS PANEL */}
       <div className="fixed top-3 left-3 z-30 flex flex-col gap-2.5 pointer-events-none">
+        {topBarCollapsed ? (
+          <button
+            type="button"
+            data-testid="expand-top-bar-btn"
+            onClick={() => setTopBarCollapsed(false)}
+            title="Expandir barra superior do RollPortal"
+            aria-label="Expandir barra superior"
+            className="w-fit bg-[#232530]/95 hover:bg-[#2c2f3e] border border-zinc-700/80 rounded-2xl px-2.5 py-1.5 shadow-2xl pointer-events-auto flex items-center gap-1.5 text-xs font-bold text-violet-200 hover:text-white transition-colors cursor-pointer"
+          >
+            <img
+              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              alt="RollPortal"
+              className="w-5 h-5 rounded-full object-cover"
+            />
+            <span>RollPortal</span>
+            <ChevronDown className="w-3.5 h-3.5 text-violet-400" />
+          </button>
+        ) : (
         <div className="flex items-center gap-1 bg-[#232530]/95 border border-zinc-700/80 rounded-2xl px-2.5 py-1.5 shadow-2xl pointer-events-auto">
           <button
             type="button"
             onClick={() => setShowCampaignHub(true)}
             aria-label="Abrir Tela Inicial de Personagens e Campanha"
             title="Tela Inicial da Campanha (Nome, Foto de Capa & Fichas)"
-            className="w-7 h-7 rounded-full bg-rose-500/20 border border-rose-400/50 flex items-center justify-center text-rose-300 hover:bg-rose-500 hover:text-white transition-colors cursor-pointer mr-1"
+            className="w-7 h-7 rounded-full bg-rose-500/20 border border-rose-400/50 flex items-center justify-center text-rose-300 hover:bg-rose-500 hover:text-white transition-colors cursor-pointer mr-1 overflow-hidden"
           >
-            <LayoutGrid className="w-4 h-4" />
+            <img
+              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              alt="RollPortal"
+              className="w-full h-full object-cover"
+            />
           </button>
 
           <div
@@ -1824,22 +1840,25 @@ export default function App() {
             <BookOpen className="w-4 h-4" />
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setSidebarOpen(true);
-              setSidebarTab('musica');
-            }}
-            aria-label="Abrir Mixer de Música do YouTube"
-            title="Mixer Multi-Música em Segundo Plano"
-            className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
-              sidebarOpen && sidebarTab === 'musica'
-                ? 'bg-violet-600 text-white'
-                : 'text-zinc-300 hover:bg-zinc-700/60 hover:text-white'
-            }`}
-          >
-            <Music className="w-4 h-4" />
-          </button>
+          {userRole === 'mestre' && (
+            <button
+              type="button"
+              data-testid="hud-open-musica-btn"
+              onClick={() => {
+                setSidebarOpen(true);
+                setSidebarTab('musica');
+              }}
+              aria-label="Abrir Mixer de Música do YouTube"
+              title="Mixer Multi-Música em Segundo Plano (Exclusivo do Mestre)"
+              className={`p-1.5 rounded-xl transition-colors cursor-pointer ${
+                sidebarOpen && sidebarTab === 'musica'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-zinc-300 hover:bg-zinc-700/60 hover:text-white'
+              }`}
+            >
+              <Music className="w-4 h-4" />
+            </button>
+          )}
 
           <button
             type="button"
@@ -1876,10 +1895,22 @@ export default function App() {
               <Eye className="w-4 h-4" />
             )}
           </button>
+
+          <button
+            type="button"
+            data-testid="toggle-top-bar-collapse-btn"
+            onClick={() => setTopBarCollapsed(true)}
+            aria-label="Diminuir barra superior"
+            title="Diminuir / Minimizar barra superior"
+            className="p-1.5 rounded-xl text-zinc-400 hover:bg-zinc-700/60 hover:text-white transition-colors cursor-pointer border-l border-zinc-700/70 pl-2 ml-0.5"
+          >
+            <ChevronUp className="w-4 h-4" />
+          </button>
         </div>
+        )}
 
         {/* Collapsed Pill when Players & Mestre Card is hidden */}
-        {!playersPanelOpen && (
+        {!playersPanelOpen && !topBarCollapsed && (
           <button
             type="button"
             data-testid="show-players-panel-btn"
@@ -2104,8 +2135,8 @@ export default function App() {
         <button
           type="button"
           onClick={() => setSidebarOpen((p) => !p)}
-          aria-label="Alternar painel lateral Quest Portal"
-          title="Alternar Painel Lateral (Dados, Iniciativa, Música em 2º Plano)"
+          aria-label="Alternar painel lateral RollPortal"
+          title="Alternar Painel Lateral (Dados, Iniciativa, Fichas e Notas)"
           className="w-9 h-9 rounded-full bg-[#232530]/95 border border-zinc-700/80 flex items-center justify-center text-zinc-200 hover:text-white shadow-xl pointer-events-auto cursor-pointer"
         >
           <ChevronDown className={`w-4 h-4 transition-transform ${sidebarOpen ? 'rotate-180' : ''}`} />

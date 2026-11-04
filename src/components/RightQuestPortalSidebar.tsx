@@ -274,11 +274,15 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
   return (
     <aside
       className="fixed top-16 right-4 bottom-20 w-96 max-w-[92vw] z-30 bg-[#181922]/95 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-zinc-100"
-      aria-label="Painel Lateral Quest Portal"
+      aria-label="Painel Lateral RollPortal"
     >
       {/* Top Segmented Navigation */}
       <div className="flex items-center justify-between px-2 py-2 bg-[#20222e] border-b border-zinc-800">
-        <div className="grid grid-cols-5 gap-1 bg-[#14151c] p-1 rounded-xl border border-zinc-800 flex-1">
+        <div
+          className={`grid ${
+            userRole === 'mestre' ? 'grid-cols-5' : 'grid-cols-4'
+          } gap-1 bg-[#14151c] p-1 rounded-xl border border-zinc-800 flex-1`}
+        >
           <button
             type="button"
             onClick={() => onChangeTab('chat')}
@@ -301,16 +305,19 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
             <Swords className="w-3 h-3 shrink-0" />
             <span>Iniciativa</span>
           </button>
-          <button
-            type="button"
-            onClick={() => onChangeTab('musica')}
-            className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
-              activeTab === 'musica' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <Music className="w-3 h-3 shrink-0" />
-            <span>Música</span>
-          </button>
+          {userRole === 'mestre' && (
+            <button
+              type="button"
+              data-testid="sidebar-tab-musica"
+              onClick={() => onChangeTab('musica')}
+              className={`py-1.5 px-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap cursor-pointer ${
+                activeTab === 'musica' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Music className="w-3 h-3 shrink-0" />
+              <span>Música</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onChangeTab('fichas')}
@@ -862,7 +869,7 @@ export const RightQuestPortalSidebar: React.FC<RightQuestPortalSidebarProps> = (
       {/* ===================================================================== */}
       {/* TAB 3: BACKGROUND MULTI-TRACK YOUTUBE AUDIO MIXER WITH FOLDERS        */}
       {/* ===================================================================== */}
-      {activeTab === 'musica' && (
+      {activeTab === 'musica' && userRole === 'mestre' && (
         <div className="flex-1 flex flex-col overflow-hidden p-3 space-y-3">
           <div className="bg-[#20222e] border border-zinc-800 rounded-xl p-2.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">

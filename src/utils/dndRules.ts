@@ -963,7 +963,7 @@ export function resolveTokenMovementWithWalls(
 
   const halfW = (tokenWidthSquares || 1) / 2;
   const halfH = (tokenHeightSquares || 1) / 2;
-  const bodyRadius = Math.min(halfW, halfH) * 0.92; // Keep full token body & center on its own side of the wall/door
+  const bodyRadius = Math.min(halfW, halfH) * 0.92; // Keep full token body on its own side without sticky proximity traps
 
   const isStepBlocked = (fromTopX: number, fromTopY: number, toTopX: number, toTopY: number): boolean => {
     const c1x = fromTopX + halfW;
@@ -977,10 +977,10 @@ export function resolveTokenMovementWithWalls(
       const hit = intersectSegments2D(c1x, c1y, c2x, c2y, w.x1, w.y1, w.x2, w.y2);
       if (hit.intersects) return true;
 
-      // 2. Check if target token body overlaps the wall segment
+      // 2. Check if target token body moves closer and overlaps the wall segment
       const distToWall = distancePointToSegment2D(c2x, c2y, w.x1, w.y1, w.x2, w.y2);
       const startDistToWall = distancePointToSegment2D(c1x, c1y, w.x1, w.y1, w.x2, w.y2);
-      if (distToWall < bodyRadius && (distToWall < startDistToWall || distToWall < 0.22)) {
+      if (distToWall < bodyRadius && distToWall < startDistToWall - 1e-4) {
         return true;
       }
     }
@@ -1017,16 +1017,6 @@ export function resolveTokenMovementWithWalls(
     bestX = targetX;
   } else if (Math.abs(targetY - bestY) > 0.01 && !isStepBlocked(bestX, bestY, bestX, targetY)) {
     bestY = targetY;
-  }
-
-  const quarterX = Math.round(bestX * 4) / 4;
-  const quarterY = Math.round(bestY * 4) / 4;
-  if (!isStepBlocked(startX, startY, quarterX, quarterY)) {
-    return {
-      x: quarterX,
-      y: quarterY,
-      collided: true,
-    };
   }
 
   return {

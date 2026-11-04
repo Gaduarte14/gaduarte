@@ -1434,6 +1434,30 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       )
     : 0;
 
+  // Keep pointer tracking active on window during token drag / pan / wall draw so moving over HUD overlays never drops the drag!
+  const windowMoveHandlerRef = useRef(handleMouseMoveCanvas);
+  windowMoveHandlerRef.current = handleMouseMoveCanvas;
+  const windowUpHandlerRef = useRef(handleMouseUpCanvas);
+  windowUpHandlerRef.current = handleMouseUpCanvas;
+
+  useEffect(() => {
+    if (!draggingTokenId && !isPanning && !wallDraft && !measurePoints && currentStroke.length === 0) {
+      return;
+    }
+    const onWinPointerMove = (ev: PointerEvent) => {
+      windowMoveHandlerRef.current(ev as unknown as React.MouseEvent<HTMLDivElement>);
+    };
+    const onWinPointerUp = () => {
+      windowUpHandlerRef.current();
+    };
+    window.addEventListener('pointermove', onWinPointerMove, { passive: true });
+    window.addEventListener('pointerup', onWinPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onWinPointerMove);
+      window.removeEventListener('pointerup', onWinPointerUp);
+    };
+  }, [draggingTokenId, isPanning, wallDraft, measurePoints, currentStroke.length]);
+
   return (
     <div
       ref={containerRef}
@@ -1441,7 +1465,6 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
       onPointerMove={handleMouseMoveCanvas}
       onPointerUp={handleMouseUpCanvas}
       onPointerCancel={cancelDragIfActive}
-      onMouseLeave={handleMouseUpCanvas}
       onWheel={handleWheelCanvas}
       data-testid="tactical-map-viewport"
       data-map-surface="true"
@@ -1520,7 +1543,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           <svg
             data-testid="gm-structural-walls-svg"
             viewBox={`0 0 ${mapWidthPx} ${mapHeightPx}`}
-            className="absolute inset-0 w-full h-full pointer-events-none z-[15]"
+            className="absolute inset-0 w-full h-full pointer-events-none z-[25]"
           >
             {(scene.paredes || []).map((seg) => {
               const x1 = seg.x1 * gridSize;
@@ -1843,8 +1866,8 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                 className="absolute z-30 group cursor-pointer active:cursor-grabbing flex items-center justify-center touch-none"
                 role="button"
                 tabIndex={0}
-                title={`Luz (${token.luzQuadrados}q) — Clique para selecionar, aumentar ou diminuir`}
-                aria-label={`Fonte de Luz invisível (${token.luzQuadrados} quadrados)`}
+                title={`Luz (${Math.round((token.luzQuadrados || 0) * 5)}ft) — Clique para selecionar, aumentar ou diminuir`}
+                aria-label={`Fonte de Luz invisível (${Math.round((token.luzQuadrados || 0) * 5)}ft)`}
               >
                 {/* 100% Invisible Token body when unselected; shows dashed selection ring when selected or hovered */}
                 <div
@@ -1876,13 +1899,13 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                           luzQuadrados: Math.max(0, (token.luzQuadrados || 0) - 1),
                         });
                       }}
-                      title="Diminuir alcance da Luz (-1 quadrado)"
+                      title="Diminuir alcance da Luz (-5ft)"
                       className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-amber-600/40 text-amber-300 flex items-center justify-center cursor-pointer transition-colors"
                     >
                       <Minus className="w-3.5 h-3.5" />
                     </button>
                     <span className="text-[11px] font-mono font-bold text-amber-300 px-1">
-                      💡 {token.luzQuadrados}q
+                      💡 {Math.round((token.luzQuadrados || 0) * 5)}ft
                     </span>
                     <button
                       type="button"
@@ -1894,7 +1917,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                           luzQuadrados: Math.min(24, (token.luzQuadrados || 0) + 1),
                         });
                       }}
-                      title="Aumentar alcance da Luz (+1 quadrado)"
+                      title="Aumentar alcance da Luz (+5ft)"
                       className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-amber-600/40 text-amber-300 flex items-center justify-center cursor-pointer transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -2139,7 +2162,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
           selectedToken.ehFonteDeLuz ||
           !(tokenFogVisibilityMap.get(selectedToken.id)?.insidePlayerFog ?? false)) && (
           <div
-            className="fixed top-3 left-1/2 -translate-x-1/2 lg:left-[284px] lg:right-[456px] lg:translate-x-0 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 text-xs text-zinc-100 max-w-[92vw] w-fit mx-auto"
+            className="fixed top-14 left-1/2 -translate-x-1/2 z-30 bg-[#1d1e26]/95 border border-zinc-700 rounded-2xl shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 text-xs text-zinc-100 max-w-[92vw] w-fit mx-auto"
             role="toolbar"
             aria-label={`Controles do token ${selectedToken.nome}`}
           >
@@ -2180,10 +2203,10 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
               </div>
             </div>
 
-            {/* Light Source Radius (Add / Increase / Decrease Luz — Visible to Everyone!) */}
+            {/* Light Source Radius in ft (1 square = 5ft — Visible to Everyone!) */}
             <div
               className="flex items-center gap-1.5"
-              title="Luz (Visível para TODOS os jogadores na Névoa)"
+              title="Luz em pés (ft) — 1 quadrado = 5ft (Visível para TODOS os jogadores na Névoa)"
             >
               <Flame className="w-4 h-4 text-amber-400" />
               <span className="text-zinc-300">Luz:</span>
@@ -2203,7 +2226,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                   }`}
                 >
                   {selectedToken.luzQuadrados > 0
-                    ? `Tocha (${selectedToken.luzQuadrados}q)`
+                    ? `Tocha (${Math.round((selectedToken.luzQuadrados || 0) * 5)}ft)`
                     : '+ Add Luz'}
                 </button>
               )}
@@ -2215,25 +2238,29 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                     luzQuadrados: Math.max(0, (selectedToken.luzQuadrados || 0) - 1),
                   })
                 }
-                title="Diminuir Luz (-1 quadrado)"
+                title="Diminuir Luz (-5ft)"
                 className="w-6 h-6 rounded bg-zinc-800 hover:bg-amber-600/30 text-amber-300 flex items-center justify-center cursor-pointer"
               >
                 <Minus className="w-3.5 h-3.5" />
               </button>
-              <input
-                type="number"
-                min={0}
-                max={24}
-                aria-label="Raio de luz em quadrados"
-                value={selectedToken.luzQuadrados}
-                onChange={(e) =>
-                  onUpdateToken({
-                    ...selectedToken,
-                    luzQuadrados: Math.max(0, Number(e.target.value) || 0),
-                  })
-                }
-                className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-amber-300"
-              />
+              <div className="flex items-center bg-[#14151c] border border-zinc-700 rounded px-1.5 py-0.5">
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  step={5}
+                  aria-label="Raio de luz em ft"
+                  value={Math.round((selectedToken.luzQuadrados || 0) * 5)}
+                  onChange={(e) =>
+                    onUpdateToken({
+                      ...selectedToken,
+                      luzQuadrados: Math.max(0, (Number(e.target.value) || 0) / 5),
+                    })
+                  }
+                  className="w-10 text-center font-mono bg-transparent text-amber-300 focus:outline-none"
+                />
+                <span className="text-[10px] font-mono text-amber-400/80">ft</span>
+              </div>
               <button
                 type="button"
                 onClick={() =>
@@ -2242,7 +2269,7 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
                     luzQuadrados: Math.min(24, (selectedToken.luzQuadrados || 0) + 1),
                   })
                 }
-                title="Aumentar Luz (+1 quadrado)"
+                title="Aumentar Luz (+5ft)"
                 className="w-6 h-6 rounded bg-zinc-800 hover:bg-amber-600/30 text-amber-300 flex items-center justify-center cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -2280,27 +2307,57 @@ export const TacticalMapCanvas: React.FC<TacticalMapCanvasProps> = ({
 
             {!selectedToken.ehFonteDeLuz && (
               <>
-                {/* Vision Radius in Fog of War (Exclusive to Own Player & GM) */}
+                {/* Vision Radius in Fog of War in ft (1 square = 5ft — Exclusive to Own Player & GM) */}
                 <div
                   className="flex items-center gap-1.5"
-                  title="Visão Exclusiva do Personagem (Somente o próprio jogador e o Mestre veem)"
+                  title="Visão Exclusiva do Personagem em pés (ft) — 1 quadrado = 5ft (Somente o próprio jogador e o Mestre veem)"
                 >
                   <Eye className="w-4 h-4 text-violet-400" />
                   <span className="text-zinc-300">Visão:</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={20}
-                    aria-label="Raio de visão em quadrados"
-                    value={selectedToken.visaoQuadrados}
-                    onChange={(e) =>
+                  <button
+                    type="button"
+                    onClick={() =>
                       onUpdateToken({
                         ...selectedToken,
-                        visaoQuadrados: Math.max(0, Number(e.target.value) || 0),
+                        visaoQuadrados: Math.max(0, (selectedToken.visaoQuadrados || 0) - 1),
                       })
                     }
-                    className="w-11 px-1.5 py-1 text-center font-mono bg-[#14151c] border border-zinc-700 rounded text-violet-300"
-                  />
+                    title="Diminuir Visão (-5ft)"
+                    className="w-6 h-6 rounded bg-zinc-800 hover:bg-violet-600/30 text-violet-300 flex items-center justify-center cursor-pointer"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                  </button>
+                  <div className="flex items-center bg-[#14151c] border border-zinc-700 rounded px-1.5 py-0.5">
+                    <input
+                      type="number"
+                      min={0}
+                      max={120}
+                      step={5}
+                      aria-label="Raio de visão em ft"
+                      value={Math.round((selectedToken.visaoQuadrados || 0) * 5)}
+                      onChange={(e) =>
+                        onUpdateToken({
+                          ...selectedToken,
+                          visaoQuadrados: Math.max(0, (Number(e.target.value) || 0) / 5),
+                        })
+                      }
+                      className="w-10 text-center font-mono bg-transparent text-violet-300 focus:outline-none"
+                    />
+                    <span className="text-[10px] font-mono text-violet-400/80">ft</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateToken({
+                        ...selectedToken,
+                        visaoQuadrados: Math.min(24, (selectedToken.visaoQuadrados || 0) + 1),
+                      })
+                    }
+                    title="Aumentar Visão (+5ft)"
+                    className="w-6 h-6 rounded bg-zinc-800 hover:bg-violet-600/30 text-violet-300 flex items-center justify-center cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
                 </div>
 
                 {/* Quick D&D 5e Conditions Selector on Token HUD */}

@@ -277,7 +277,7 @@ export const CampaignHubModal: React.FC<CampaignHubModalProps> = ({
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(campaign, null, 2));
     const a = document.createElement('a');
     a.href = dataStr;
-    a.download = `owlbear-quest-campanha-${campaign.codigoSala}.json`;
+    a.download = `rollportal-campanha-${campaign.codigoSala}.json`;
     a.click();
   };
 

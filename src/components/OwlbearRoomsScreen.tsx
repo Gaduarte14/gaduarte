@@ -285,7 +285,7 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
     e.preventDefault();
     const rawCode = joinCodeInput.trim().toUpperCase();
     if (!rawCode) {
-      setJoinError('Digite o código da sala (ex: OWL-5E26).');
+      setJoinError('Digite o código da sala (ex: RPT-5E26).');
       return;
     }
     setJoinError('');
@@ -337,15 +337,27 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
 
       {/* Main Rounded Central Panel (Owlbear Rodeo Rooms Style) */}
       <div className="w-full max-w-4xl bg-[#1e2030] border border-[#2e3148] rounded-3xl shadow-2xl overflow-hidden my-auto">
-        {/* Top Header: Title + Subtitle on Left, Auth & Counter on Right */}
+        {/* Top Header: RollPortal Logo + Title + Subtitle on Left, Auth & Counter on Right */}
         <div className="px-6 pt-7 pb-5 md:px-9 md:pt-8 flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold text-[#c4b5fd] tracking-tight">
-              Salas
-            </h1>
-            <p className="text-xs md:text-sm text-zinc-300 mt-1">
-              Crie uma sala para conectar seus jogadores em tempo real no Firebase Firestore
-            </p>
+          <div className="flex items-center gap-3.5">
+            <img
+              src="/assets/aistudio/1793801103481_a18b93f7.png"
+              alt="RollPortal Logo"
+              className="w-12 h-12 rounded-full object-cover shadow-lg border border-violet-400/40 shrink-0"
+            />
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl md:text-3xl font-bold text-[#c4b5fd] tracking-tight">
+                  RollPortal
+                </h1>
+                <span className="text-xs font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                  Salas
+                </span>
+              </div>
+              <p className="text-xs md:text-sm text-zinc-300 mt-1">
+                Crie uma sala para conectar seus jogadores em tempo real
+              </p>
+            </div>
           </div>
 
           <div className="flex flex-col items-end gap-2">
@@ -451,7 +463,7 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
               <input
                 type="text"
                 data-testid="player-join-code-input"
-                placeholder="Código (ex: OWL-5E26)"
+                placeholder="Código (ex: RPT-5E26)"
                 value={joinCodeInput}
                 onChange={(e) => {
                   setJoinCodeInput(e.target.value);
@@ -492,7 +504,7 @@ export const OwlbearRoomsScreen: React.FC<OwlbearRoomsScreenProps> = ({
                 <p className="text-xs text-zinc-400">
                   {activeTab === 'mestre'
                     ? 'Clique em "CRIAR UMA NOVA SALA" abaixo para começar sua mesa.'
-                    : 'Digite o código da sala acima (ex: OWL-5E26) para se conectar à campanha.'}
+                    : 'Digite o código da sala acima (ex: RPT-5E26) para se conectar à campanha.'}
                 </p>
               </div>
             ) : (

@@ -143,8 +143,8 @@ test('pastas e notas são estritamente privadas por criador (criadorId) sem vaza
   const visibleToA = filterPrivateFoldersByCreator(allMixedFolders, ownerA);
   const visibleToB = filterPrivateFoldersByCreator(allMixedFolders, ownerB);
 
-  assert.equal(visibleToA.length, 3);
-  assert.equal(visibleToB.length, 2);
+  assert.equal(visibleToA.length, 2);
+  assert.equal(visibleToB.length, 1);
   assert.ok(visibleToA.some((f) => f.nome === 'Segredos de Alice'));
   assert.ok(!visibleToB.some((f) => f.nome === 'Segredos de Alice'));
 
@@ -165,8 +165,8 @@ test('pastas e notas são estritamente privadas por criador (criadorId) sem vaza
   const notesVisibleToA = filterPrivateNotesByCreator(allMixedNotes, ownerA);
   const notesVisibleToB = filterPrivateNotesByCreator(allMixedNotes, ownerB);
 
-  assert.equal(notesVisibleToA.length, 4);
-  assert.equal(notesVisibleToB.length, 4);
+  assert.equal(notesVisibleToA.length, 1);
+  assert.equal(notesVisibleToB.length, 1);
   assert.ok(notesVisibleToA.every((n) => n.criadorId === ownerA));
   assert.ok(notesVisibleToB.every((n) => n.criadorId === ownerB));
 
@@ -177,7 +177,7 @@ test('pastas e notas são estritamente privadas por criador (criadorId) sem vaza
     secretFolderA.id,
     ownerA
   );
-  assert.equal(afterDelete.folders.length, 2);
+  assert.equal(afterDelete.folders.length, 1);
   assert.equal(afterDelete.notes[0].pastaId, null);
 });
 

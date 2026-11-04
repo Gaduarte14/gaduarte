@@ -893,11 +893,11 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
           </div>
         )}
 
-        {/* Owlbear Rodeo Bottom Pill Bar with Group Separators */}
+        {/* RollPortal Bottom Pill Bar with Group Separators */}
         <div
           className="bg-[#232530]/95 backdrop-blur-md border border-zinc-700/80 rounded-2xl px-2.5 py-1.5 shadow-2xl flex items-center gap-1 pointer-events-auto"
           role="toolbar"
-          aria-label="Barra Inferior de Recursos Owlbear"
+          aria-label="Barra Inferior de Recursos RollPortal"
         >
           {/* Search Button */}
           <button
@@ -1011,7 +1011,7 @@ export const BottomOwlbearDock: React.FC<BottomOwlbearDockProps> = ({
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
           role="dialog"
-          aria-label="Configurador de Cena e Grade Owlbear"
+          aria-label="Configurador de Cena e Grade RollPortal"
         >
           <form
             onSubmit={handleConfirmSceneModal}

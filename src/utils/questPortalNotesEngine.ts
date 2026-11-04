@@ -1113,12 +1113,6 @@ export function createDefaultQuestPortalFolders(criadorId = 'local-owner'): Ques
       criadorId,
       criadoEm: now,
     },
-    {
-      id: 'pasta-diario',
-      nome: 'Mochila & Diário Pessoal',
-      criadorId,
-      criadoEm: now,
-    },
   ];
 }
 
@@ -1132,109 +1126,32 @@ export function createDefaultQuestPortalNotes(
   return [
     {
       id: 'nota-ficha-principal',
-      titulo: 'Ficha',
+      titulo: 'Ficha (Exemplo)',
       pastaId: 'pasta-personagem',
       criadorId,
       atualizadoEm: now,
       conteudo: `# ${nomePersonagem}
 -# ${classe} • Nível [nivel = ${nivel}] • Bônus de Proficiência [prof = 3]
 
-> *"Nas sombras de Vaelthar, quem vê o brilho da lâmina já perdeu a iniciativa."*
-
----
-
 ## Atributos & Modificadores Reativos
--# Altere qualquer atributo base (ex.: \`[destreza = 18]\`) e veja a CA, Perícias e Ataques mudarem em todas as suas notas!
+-# Exemplo: altere \`[destreza = 18]\` para recalcular CA, Ataque e Perícias automaticamente.
 
 | Atributo | Valor Base | Modificador | Salvaguarda | Rolagem Rápida |
 | :--- | :---: | :---: | :---: | :--- |
-| **Força** | [forca = 10] | [mod_for = floor((forca - 10) / 2)] ({+mod_for}) | {+mod_for} | [rolar: Teste de Força | 1d20 + {mod_for}] |
 | **Destreza** | [destreza = 18] | [mod_des = floor((destreza - 10) / 2)] ({+mod_des}) | [save_des = mod_des + prof] ({+save_des}) | [rolar: Teste de Destreza | 1d20 + {mod_des}] |
 | **Constituição** | [constituicao = 14] | [mod_con = floor((constituicao - 10) / 2)] ({+mod_con}) | {+mod_con} | [rolar: Teste de Constituição | 1d20 + {mod_con}] |
-| **Inteligência** | [inteligencia = 14] | [mod_int = floor((inteligencia - 10) / 2)] ({+mod_int}) | [save_int = mod_int + prof] ({+save_int}) | [rolar: Teste de Inteligência | 1d20 + {mod_int}] |
 | **Sabedoria** | [sabedoria = 12] | [mod_sab = floor((sabedoria - 10) / 2)] ({+mod_sab}) | {+mod_sab} | [rolar: Teste de Sabedoria | 1d20 + {mod_sab}] |
-| **Carisma** | [carisma = 11] | [mod_car = floor((carisma - 10) / 2)] ({+mod_car}) | {+mod_car} | [rolar: Teste de Carisma | 1d20 + {mod_car}] |
 
 ---
 
-## Status de Combate
+## Status, Perícia & Ataque (1 Exemplo de Cada)
 - **Pontos de Vida Máximos:** [pv_max = 8 + mod_con + (nivel - 1) * (5 + mod_con)] PV
-- **Classe de Armadura (Armadura de Couro Batido 12 + DES):** [ca = 12 + mod_des] (**CA {ca}**)
-- **Iniciativa:** [iniciativa = mod_des] ({+iniciativa}) → [rolar: Iniciativa | 1d20 + {iniciativa}]
-- **Percepção Passiva:** [percepcao_passiva = 10 + mod_sab + prof] (**{percepcao_passiva}**)
-
-### Perícias Principais
-1. **Furtividade (Especialização):** [furtividade = mod_des + prof * 2] ({+furtividade}) [rolar: Furtividade | 1d20 + {furtividade}]
-2. **Acrobacia (Proficiente):** [acrobacia = mod_des + prof] ({+acrobacia}) [rolar: Acrobacia | 1d20 + {acrobacia}]
-3. **Percepção (Proficiente):** [percepcao = mod_sab + prof] ({+percepcao}) [rolar: Percepção | 1d20 + {percepcao}]
-4. **Investigação (Proficiente):** [investigacao = mod_int + prof] ({+investigacao}) [rolar: Investigação | 1d20 + {investigacao}]`,
-    },
-    {
-      id: 'nota-mecanicas-combate',
-      titulo: 'Mecânicas',
-      pastaId: 'pasta-personagem',
-      criadorId,
-      atualizadoEm: now,
-      conteudo: `# Arsenal & Mecânicas de Combate
--# Todas as fórmulas abaixo puxam automaticamente \`{mod_des}\` ({+mod_des}) e \`{prof}\` ({+prof}) da nota **Ficha**.
-
-## Tabela de Armas & Ataques
-- **Bônus de Ataque Ágil/Distância:** [atk_des = mod_des + prof] (**{+atk_des}**)
-- **Dados de Ataque Furtivo (Nível {nivel}):** [dados_furtivo = ceil(nivel / 2)] ({dados_furtivo}d6)
-
-| Arma / Habilidade | Bônus de Acerto | Dano Base | Ações Rápidas |
-| :--- | :---: | :---: | :--- |
-| **Adaga Sombria +1** | {+atk_des + 1} | 1d4 + {mod_des + 1} | [rolar: Acerto Adaga +1 | 1d20 + {atk_des + 1}] [rolar: Dano Adaga +1 | 1d4 + {mod_des + 1}] |
-| **Arco Curto** | {+atk_des} | 1d6 + {mod_des} | [rolar: Acerto Arco Curto | 1d20 + {atk_des}] [rolar: Dano Arco Curto | 1d6 + {mod_des}] |
-| **Ataque Furtivo** | Automático | {dados_furtivo}d6 | [rolar: Dano Furtivo | {dados_furtivo}d6] |
-| **Veneno de Serpente (CD {8 + prof + mod_int})** | Salvaguarda CON | 3d6 | [rolar: Dano de Veneno | 3d6] [calc: CD do Veneno | 8 + prof + mod_int] |
-
----
-
-## Rolagens Diretas no Texto (Auto-Link)
--# Qualquer dado escrito no texto (com ou sem espaços) vira um botão clicável automaticamente:
-- Teste com penalidade extrema: 1d20-100
-- Teste com bônus lendário: 1d20+ 100
-- Poção de Cura Maior: 4d4 + 4
-- Atributo (4d6 descartando o menor): 4d6kh3`,
-    },
-    {
-      id: 'nota-inventario',
-      titulo: 'Inventário',
-      pastaId: 'pasta-diario',
-      criadorId,
-      atualizadoEm: now,
-      conteudo: `# Inventário & Riquezas
--# Capacidade de Carga Máxima: [carga_max = forca * 15] lb (Baseado em Força {forca})
-
-## Moedas
-- **Peças de Ouro (PO):** [po = 145]
-- **Peças de Prata (PP):** [pp = 30]
-- **Patrimônio Total em Ouro:** {po + pp / 10} PO
-
-## Equipamentos Carregados
-- __Manto Élfico__ *(Vantagem em testes de Furtividade para se esconder)*
-- **Ferramentas de Ladrão** → [rolar: Abrir Fechadura | 1d20 + {mod_des} + {prof}]
-- ~~Tocha Comum~~ *(Consumida na masmorra)*
-- 2x Poção de Cura Normal (2d4 + 2)`,
-    },
-    {
-      id: 'nota-anotacoes',
-      titulo: 'Segredos & Notas',
-      pastaId: 'pasta-diario',
-      criadorId,
-      atualizadoEm: now,
-      conteudo: `# Diário Pessoal (100% Particular)
--# Visível somente para você • Ninguém mais na mesa tem acesso a estas notas
-
-> O Lorde Vael escondeu a chave rúnica atrás do altar norte. Precisamos passar pelos guardas com furtividade pelo menos CD 15.
-
-\`\`\`
-Mapa Mental do Cofre:
-[Entrada] ---> [Corredor de Armadilhas (CD 16)] ---> [Altar Norte]
-\`\`\`
-
-- Lembrar de usar **Esquiva Sobrenatural** quando sofrer um ataque corpo-a-corpo.`,
+- **Classe de Armadura:** [ca = 12 + mod_des] (**CA {ca}**)
+- **Bônus de Ataque:** [atk_des = mod_des + prof] (**{+atk_des}**)
+- **Furtividade (Especialização):** [furtividade = mod_des + prof * 2] ({+furtividade}) → [rolar: Furtividade | 1d20 + {furtividade}]
+- **Ataque Exemplo (Adaga +1):** [rolar: Acerto Adaga +1 | 1d20 + {atk_des + 1}] • Dano: [rolar: Dano Adaga +1 | 1d4 + {mod_des + 1}]
+- **Rolagem Direta no Texto (Auto-Link):** 2d4 + 2`,
     },
   ];
 }
+
